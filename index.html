@@ -43,6 +43,7 @@ const I={
   ChevR:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9,18 15,12 9,6"/></svg>,
   Menu:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>,
   Plus:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Compare:({s=18})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>,
 };
 const Stars=({r,c})=>(<div style={{display:"flex",alignItems:"center",gap:2}}>{[1,2,3,4,5].map(i=><I.Star key={i} f={i<=Math.round(r)}/>)}<span style={{fontSize:11,color:"#888",marginLeft:4}}>{r}{c?` (${c})`:""}</span></div>);
 const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
@@ -98,11 +99,16 @@ CRITICAL: Respond with ONLY a valid JSON object. Start with { end with }. No oth
 Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences.`;
 }
 
+function needsWebSearch(text){
+  const t=text.toLowerCase();
+  return/\b(latest|newest|current|today|2024|2025|2026|right now|just released|new release|price check|in stock|available now|best .* right now)\b/.test(t);
+}
+
 async function callAI(messages, sys, opts={}) {
   const proxy = getProxyUrl();
   if (!proxy) throw new Error("Proxy not configured. Go to Settings → AI Configuration to set your proxy URL.");
   const body={model:"claude-sonnet-4-20250514",max_tokens:opts.maxTokens||2048,system:sys,messages};
-  if(opts.webSearch!==false)body.tools=[{type:"web_search_20250305",name:"web_search"}];
+  if(opts.webSearch===true)body.tools=[{type:"web_search_20250305",name:"web_search"}];
   const r = await fetch(proxy, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`API error ${r.status}`);}
   const d=await r.json();return d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
@@ -179,6 +185,9 @@ window.App = function App(){
     return[];
   });
   const[showThreadList,setShowThreadList]=useState(false);
+  const[compareIds,setCompareIds]=useState([]);
+  const[showCompare,setShowCompare]=useState(false);
+  const togCompare=id=>setCompareIds(p=>p.includes(id)?p.filter(x=>x!==id):p.length>=3?p:[...p,id]);
 
   const scrollRef=useRef(null);
   const histRef=useRef(null);
@@ -328,7 +337,8 @@ window.App = function App(){
     histRef.current=[...histRef.current,{role:"user",content:text}];
     const recent=histRef.current.slice(-4);
     const sys=buildSystemPrompt(user,searches,prods);
-    callAI(recent,sys).then(raw=>{
+    const useWeb=needsWebSearch(text);
+    callAI(recent,sys,{webSearch:useWeb}).then(raw=>{
       const parsed=parseAI(raw);
       histRef.current=[...histRef.current,{role:"assistant",content:raw}];
       searchCache.current[cacheKey]=parsed;
@@ -398,9 +408,9 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
     inp:{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #e5e5e5",fontSize:14,outline:"none",boxSizing:"border-box",background:"#fff"},
   };
 
-  const PC=({p,sm})=>(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
-    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
-    <div style={{padding:9}}><div style={{fontSize:12,fontWeight:500,lineHeight:1.3,height:28,overflow:"hidden"}}>{p.name}</div>{p.rating>0&&<Stars r={p.rating} c={sm?null:p.reviews}/>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}><span style={{fontSize:14,fontWeight:700}}>${p.price}</span><span style={{fontSize:10,color:"#999"}}>{p.retailer}</span></div>{!sm&&p.why&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3,lineHeight:1.3}}>{p.why}</div>}</div></div>);
+  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
+    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:22,height:22,borderRadius:4,background:inCmp?"#7c3aed":"rgba(255,255,255,0.85)",border:inCmp?"none":"1px solid #ddd",display:"flex",alignItems:"center",justifyContent:"center",color:inCmp?"#fff":"#bbb"}}>{inCmp?<I.Check s={12}/>:<I.Compare s={12}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
+    <div style={{padding:9}}><div style={{fontSize:12,fontWeight:500,lineHeight:1.3,height:28,overflow:"hidden"}}>{p.name}</div>{p.rating>0&&<Stars r={p.rating} c={sm?null:p.reviews}/>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}><span style={{fontSize:14,fontWeight:700}}>${p.price}</span><span style={{fontSize:10,color:"#999"}}>{p.retailer}</span></div>{!sm&&p.why&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3,lineHeight:1.3}}>{p.why}</div>}</div></div>);};
 
   // ========== LOGIN / ONBOARDING ==========
   if(!user){
@@ -575,15 +585,32 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
       </>);})()}
 
       {/* ACTIVITY */}
-      {pg==="activity"&&(<>
+      {pg==="activity"&&(()=>{const uniqSearches=[...new Set([...searches].reverse())];return(<>
         <div style={s.hd}><div style={{fontSize:22,fontWeight:700}}>My Activity</div></div>
+
+        {/* Search History */}
+        {uniqSearches.length>0&&<div style={s.sec}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><I.Search s={18}/><span style={s.st}>Search History</span></div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {uniqSearches.slice(0,15).map((q,i)=>{const cached=searchCache.current[q.toLowerCase().trim()];return(
+              <div key={i} onClick={()=>{if(msgs.length>0&&threads.length<MAX_THREADS){newThread();}setPg("chat");setTimeout(()=>handleSend(q),100);}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",background:"#fff",borderRadius:10,border:"1px solid #f0f0f0",cursor:"pointer"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+                  <I.Clock s={14}/>
+                  <span style={{fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{q}</span>
+                </div>
+                {cached&&<span style={{fontSize:10,color:"#16a34a",fontWeight:600,flexShrink:0,marginLeft:8}}>cached</span>}
+              </div>
+            );})}
+          </div>
+        </div>}
+
         <div style={s.sec}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><I.Cart s={18}/><span style={s.st}>Purchases</span></div>
           {buyList.length===0?<div style={{color:"#999",fontSize:14,padding:"20px 0"}}>No purchases yet.</div>:buyList.map((b,i)=><div key={i} onClick={()=>open(b.p)} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:"1px solid #f0f0f0",cursor:"pointer"}}><div style={{width:48,height:48,borderRadius:12,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>{b.p.img}</div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{b.p.name}</div><div style={{fontSize:11,color:"#888",marginTop:2}}>{b.ret} · {b.date}</div></div><div style={{fontSize:14,fontWeight:600}}>${b.p.price}</div></div>)}
         </div>
         {savedP.length>0&&<div style={s.sec}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><span style={{color:"#ef4444"}}><I.Heart s={18} f/></span><span style={s.st}>Saved</span></div><div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:4}}>{savedP.map(p=><PC key={p.id} p={p} sm/>)}</div></div>}
         {viewedP.length>0&&<div style={{...s.sec,paddingBottom:20}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><I.Clock s={18}/><span style={s.st}>Viewed</span></div><div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:4}}>{viewedP.slice(0,10).map(p=><PC key={p.id} p={p} sm/>)}</div></div>}
-        {viewedP.length===0&&savedP.length===0&&buyList.length===0&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"60px 20px",gap:12,textAlign:"center"}}><div style={{fontSize:48}}>📋</div><div style={{fontSize:16,fontWeight:700}}>No activity yet</div></div>}
-      </>)}
+        {viewedP.length===0&&savedP.length===0&&buyList.length===0&&searches.length===0&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"60px 20px",gap:12,textAlign:"center"}}><div style={{fontSize:48}}>📋</div><div style={{fontSize:16,fontWeight:700}}>No activity yet</div></div>}
+      </>);})()}
 
       {/* SETTINGS */}
       {pg==="settings"&&(<>
@@ -609,11 +636,54 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Cached searches: {Object.keys(searchCache.current).length}</div>
           </div>
 
-          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null);threadVolatileRef.current={};const t=createThread();setThreads([t]);setActiveThreadId(t.id);clearAllState();saveState(STORE_KEYS.user,user);saveState(STORE_KEYS.threads,[t]);}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
-          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};threadVolatileRef.current={};setThreads([]);setActiveThreadId(null);clearAllState();}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
-          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v4.0</div>
+          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null);threadVolatileRef.current={};setCompareIds([]);setShowCompare(false);const t=createThread();setThreads([t]);setActiveThreadId(t.id);clearAllState();saveState(STORE_KEYS.user,user);saveState(STORE_KEYS.threads,[t]);}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
+          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};threadVolatileRef.current={};setCompareIds([]);setShowCompare(false);setThreads([]);setActiveThreadId(null);clearAllState();}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
+          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v5.0</div>
         </div>
       </>)}
+
+      {/* COMPARE BAR */}
+      {compareIds.length>=2&&!showCompare&&pg!=="chat"&&(<div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",maxWidth:440,width:"calc(100% - 40px)",background:"#7c3aed",color:"#fff",borderRadius:16,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",zIndex:90,boxShadow:"0 4px 20px rgba(124,58,237,0.3)"}}>
+        <span style={{fontSize:14,fontWeight:600}}>{compareIds.length} products selected</span>
+        <div style={{display:"flex",gap:8}}>
+          <div onClick={()=>setShowCompare(true)} style={{padding:"8px 16px",borderRadius:10,background:"#fff",color:"#7c3aed",fontSize:13,fontWeight:600,cursor:"pointer"}}>Compare</div>
+          <div onClick={()=>setCompareIds([])} style={{padding:"8px 12px",borderRadius:10,background:"rgba(255,255,255,0.2)",fontSize:13,cursor:"pointer"}}>Clear</div>
+        </div>
+      </div>)}
+
+      {/* COMPARE VIEW */}
+      {showCompare&&(()=>{const cp=compareIds.map(id=>prods.find(p=>p.id===id)).filter(Boolean);if(cp.length<2){setShowCompare(false);return null;}
+        const rows=[{l:"Price",f:p=>"$"+p.price},{l:"Rating",f:p=>p.rating+" / 5"},{l:"Reviews",f:p=>(p.reviews||0).toLocaleString()},{l:"Retailer",f:p=>p.retailer},{l:"Category",f:p=>p.cat},{l:"Deal",f:p=>p.deal?"-"+p.dealPct+"%":"No"}];
+        const minPrice=Math.min(...cp.map(p=>p.price));const maxRating=Math.max(...cp.map(p=>p.rating));
+        return(<div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"#fff",zIndex:300,display:"flex",flexDirection:"column"}}>
+          <div style={{...s.hd,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div onClick={()=>setShowCompare(false)} style={{cursor:"pointer",padding:4}}><I.Back/></div>
+            <div style={{fontSize:16,fontWeight:700}}>Compare ({cp.length})</div>
+            <div onClick={()=>{setCompareIds([]);setShowCompare(false);}} style={{fontSize:13,color:"#7c3aed",cursor:"pointer",fontWeight:600}}>Clear</div>
+          </div>
+          <div style={{flex:1,overflowY:"auto",overflowX:"auto",padding:16}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr><th style={{textAlign:"left",padding:"8px 6px",borderBottom:"2px solid #f0f0f0",position:"sticky",top:0,background:"#fff"}}></th>
+                {cp.map(p=><th key={p.id} style={{padding:"8px 6px",borderBottom:"2px solid #f0f0f0",textAlign:"center",minWidth:120,position:"sticky",top:0,background:"#fff"}}>
+                  <div style={{fontSize:32,marginBottom:4}}>{p.img}</div>
+                  <div style={{fontSize:12,fontWeight:600,lineHeight:1.3,height:32,overflow:"hidden"}}>{p.name}</div>
+                </th>)}
+              </tr></thead>
+              <tbody>
+                {rows.map((r,i)=><tr key={i}>{[<td key="l" style={{padding:"10px 6px",fontWeight:600,color:"#888",borderBottom:"1px solid #f5f5f5",whiteSpace:"nowrap"}}>{r.l}</td>,
+                  ...cp.map(p=><td key={p.id} style={{padding:"10px 6px",textAlign:"center",borderBottom:"1px solid #f5f5f5",fontWeight:r.l==="Price"&&p.price===minPrice?700:r.l==="Rating"&&p.rating===maxRating?700:400,color:r.l==="Price"&&p.price===minPrice?"#16a34a":r.l==="Rating"&&p.rating===maxRating?"#f59e0b":r.l==="Deal"&&p.deal?"#ef4444":"#333"}}>{r.f(p)}</td>)
+                ]}</tr>)}
+                <tr><td style={{padding:"10px 6px",fontWeight:600,color:"#888"}}>Why</td>
+                  {cp.map(p=><td key={p.id} style={{padding:"10px 6px",fontSize:11,color:"#555",lineHeight:1.4,textAlign:"center"}}>{p.why||"—"}</td>)}
+                </tr>
+              </tbody>
+            </table>
+            <div style={{display:"flex",gap:8,marginTop:20,flexWrap:"wrap",justifyContent:"center"}}>
+              {cp.map(p=>p.url&&p.url!=="#"?<a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn(),flex:1,minWidth:140,textDecoration:"none",fontSize:12,padding:"10px 12px"}}>{p.retailer} <I.ExtLink s={12}/></a>:null)}
+            </div>
+          </div>
+        </div>);
+      })()}
 
       {/* NAV */}
       {pg!=="chat"&&(<nav style={s.nav}>{[{id:"home",ic:<I.Home/>,lb:"Home"},{id:"chat",ic:<I.Search/>,lb:"Search"},{id:"activity",ic:<I.Clock/>,lb:"Activity"},{id:"settings",ic:<I.Settings/>,lb:"Settings"}].map(t=>(<div key={t.id} onClick={()=>setPg(t.id)} style={s.ni(pg===t.id)}>{t.ic}<span>{t.lb}</span></div>))}</nav>)}
