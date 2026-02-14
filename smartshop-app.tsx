@@ -130,7 +130,7 @@ export default function App(){
 
   const scrollRef=useRef(null);
   const histRef=useRef([]);
-  const prev=useRef("home");
+  const prevStack=useRef([]);
   const homeDataSearchCount=useRef(0);
   const homeRecoveryAttempted=useRef(false);
   const searchCache=useRef({});
@@ -294,7 +294,7 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
     return ()=>clearTimeout(timer);
   },[user,searches.length,busy]);
 
-  const open=p=>{setSel(p);prev.current=pg;setPg("product");};
+  const open=p=>{setSel(p);prevStack.current.push(pg);setPg("product");};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const logBuy=p=>setBuys(pr=>[{pid:p.id,date:new Date().toISOString().split("T")[0],ret:p.retailer},...pr]);
 
@@ -479,7 +479,7 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
 
       {/* PRODUCT */}
       {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);return(<>
-        <div style={{...s.hd,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div onClick={()=>setPg(prev.current)} style={{cursor:"pointer",padding:4}}><I.Back/></div><div style={{fontSize:16,fontWeight:600}}>Product Details</div><div onClick={()=>togSave(p.id)} style={{cursor:"pointer",color:sv?"#ef4444":"#999"}}><I.Heart s={22} f={sv}/></div></div>
+        <div style={{...s.hd,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div onClick={()=>{const back=prevStack.current.pop()||"home";setPg(back);}} style={{cursor:"pointer",padding:4}}><I.Back/></div><div style={{fontSize:16,fontWeight:600}}>Product Details</div><div onClick={()=>togSave(p.id)} style={{cursor:"pointer",color:sv?"#ef4444":"#999"}}><I.Heart s={22} f={sv}/></div></div>
         <div style={{background:"#f8f8f8",height:220,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.img}</div>
         <div style={{padding:20}}>
           <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span></div>
@@ -551,7 +551,7 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
       </>)}
 
       {/* COMPARE BAR */}
-      {compareIds.length>=2&&!showCompare&&pg!=="chat"&&(<div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",maxWidth:440,width:"calc(100% - 40px)",background:"#7c3aed",color:"#fff",borderRadius:16,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",zIndex:90,boxShadow:"0 4px 20px rgba(124,58,237,0.3)"}}>
+      {compareIds.length>=2&&!showCompare&&(<div style={{position:"fixed",bottom:pg==="chat"?72:80,left:"50%",transform:"translateX(-50%)",maxWidth:440,width:"calc(100% - 40px)",background:"#7c3aed",color:"#fff",borderRadius:16,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",zIndex:90,boxShadow:"0 4px 20px rgba(124,58,237,0.3)"}}>
         <span style={{fontSize:14,fontWeight:600}}>{compareIds.length} products selected</span>
         <div style={{display:"flex",gap:8}}>
           <div onClick={()=>setShowCompare(true)} style={{padding:"8px 16px",borderRadius:10,background:"#fff",color:"#7c3aed",fontSize:13,fontWeight:600,cursor:"pointer"}}>Compare</div>
