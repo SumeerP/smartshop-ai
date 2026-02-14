@@ -354,8 +354,6 @@ window.App = function App(){
   const fireHomeFeed=useCallback(()=>{
     if(homeFeedInFlight.current||!user||searches.length<2)return;
     homeFeedInFlight.current=true;
-    homeRecoveryAttempted.current=true;
-    homeDataSearchCount.current=searches.length;
     setHomeLoading(true);
     const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
     const recentSearches=searches.slice(-5).join(", ");
@@ -373,23 +371,20 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
         const popular=mkP(j.popularPurchases);
         const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
         homeHasData.current=true;
+        homeRecoveryAttempted.current=true;
+        homeDataSearchCount.current=searches.length;
         setHomeData({deals,trending:j.trending||[],popular,bySearch});
         setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
-      }catch(e){
-        homeDataSearchCount.current=homeDataSearchCount.current-1;
-      }
-    }).catch(()=>{
-      homeDataSearchCount.current=homeDataSearchCount.current-1;
-    }).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
+      }catch(e){console.warn("Home feed parse error",e);}
+    }).catch(e=>{console.warn("Home feed API error",e);}).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
   },[user,searches]);
 
+  // Trigger home feed: on first load (no data yet), or every 3 new searches
   useEffect(()=>{
     if(!user||searches.length<2)return;
-    const needsFirst=!homeHasData.current&&!homeRecoveryAttempted.current;
-    const newSinceLastFeed=searches.length-homeDataSearchCount.current;
-    if(!needsFirst&&newSinceLastFeed<3)return;
+    if(homeHasData.current&&searches.length-homeDataSearchCount.current<3)return;
     if(homeFeedTimer.current)clearTimeout(homeFeedTimer.current);
-    const delay=needsFirst?5000:30000;
+    const delay=homeHasData.current?30000:5000;
     homeFeedTimer.current=setTimeout(()=>{
       homeFeedTimer.current=null;
       fireHomeFeed();
