@@ -1,25 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>SmartShop AI - Personal Shopping Assistant</title>
-  <meta name="description" content="AI-powered shopping app with conversational search, personalized recommendations, and smart product discovery.">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛍️</text></svg>">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'Segoe UI', sans-serif; background: #fafafa; overflow-x: hidden; }
-    #root { min-height: 100vh; }
-    ::-webkit-scrollbar { width: 0; height: 0; }
-  </style>
-</head>
-<body>
-  <div id="root"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-  <script type="text/babel">
-    const { useState, useEffect, useCallback, useRef, memo } = React;
+import { useState, useEffect, useCallback, useRef, memo } from "react";
 
 // --- Icons ---
 const I={
@@ -45,15 +24,7 @@ const I={
 const Stars=({r,c})=>(<div style={{display:"flex",alignItems:"center",gap:2}}>{[1,2,3,4,5].map(i=><I.Star key={i} f={i<=Math.round(r)}/>)}<span style={{fontSize:11,color:"#888",marginLeft:4}}>{r}{c?` (${c})`:""}</span></div>);
 const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
 
-// --- Configuration ---
-// IMPORTANT: After deploying your Cloudflare Worker, replace this URL with your actual worker URL.
-// Example: https://smartshop-proxy.your-subdomain.workers.dev
-const PROXY_URL = localStorage.getItem('__smartshop_proxy') || '';
-
-function getProxyUrl() { return PROXY_URL || localStorage.getItem('__smartshop_proxy') || ''; }
-function setProxyUrl(url) { try { localStorage.setItem('__smartshop_proxy', url); } catch {} }
-
-// --- AI ---
+// --- AI (built-in, no key needed) ---
 function buildSystemPrompt(profile, searches, prods) {
   const pref = profile ? `
 USER PROFILE:
@@ -75,9 +46,7 @@ Rules: 2-5 real products, real prices, real retailers. Use web search for curren
 }
 
 async function callAI(messages, sys) {
-  const proxy = getProxyUrl();
-  if (!proxy) throw new Error("Proxy not configured. Go to Settings → AI Configuration to set your proxy URL.");
-  const r = await fetch(proxy, {method:"POST",headers:{"Content-Type":"application/json"},
+  const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2048,system:sys,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})});
   if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`API error ${r.status}`);}
   const d=await r.json();return d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
@@ -116,7 +85,7 @@ const Tog=({on:d,onChange})=>{const[on,setOn]=useState(d);return(<div onClick={(
 const Chips=({options,selected,onToggle,multi=true})=>(<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{options.map(o=>{const sel=multi?selected.includes(o):selected===o;return(<div key={o} onClick={()=>onToggle(o)} style={{padding:"8px 16px",borderRadius:20,fontSize:13,fontWeight:500,border:sel?"1.5px solid #000":"1px solid #e0e0e0",background:sel?"#000":"#fff",color:sel?"#fff":"#666",cursor:"pointer"}}>{o}</div>);})}</div>);
 
 // ========== MAIN APP ==========
-window.App = function App(){
+export default function App(){
   // Auth & profile
   const[user,setUser]=useState(null); // {name,email,gender,age,skin,hair,interests,budget}
   const[onboardStep,setOnboardStep]=useState(0);
@@ -135,8 +104,6 @@ window.App = function App(){
   const[searches,setSearches]=useState([]);
   const[homeData,setHomeData]=useState(null);
   const[homeLoading,setHomeLoading]=useState(false);
-  const[proxyUrl,setProxyUrlState]=useState(()=>getProxyUrl());
-  const[proxyInput,setProxyInput]=useState("");
   const scrollRef=useRef(null);
   const histRef=useRef([]);
   const prev=useRef("home");
@@ -404,23 +371,6 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <button onClick={()=>{setFormData({...user});setUser(null);setOnboardStep(1)}} style={{...s.btn("s"),marginTop:16,fontSize:13}}>Edit Profile</button>
           </div>
 
-          {/* AI Config */}
-          <div style={{background:"#fff",borderRadius:16,border:proxyUrl?"1px solid #f0f0f0":"2px solid #7c3aed",padding:20,marginBottom:16}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><span style={{color:"#7c3aed"}}><I.Sparkle s={18}/></span><div style={{fontSize:16,fontWeight:700}}>AI Configuration</div></div>
-            {proxyUrl?(<div>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><div style={{width:8,height:8,borderRadius:4,background:"#16a34a"}}/><span style={{fontSize:13,color:"#16a34a",fontWeight:600}}>Connected</span></div>
-              <div style={{fontSize:12,color:"#888",marginBottom:12,wordBreak:"break-all",fontFamily:"monospace",background:"#f5f5f5",padding:"8px 10px",borderRadius:8}}>{proxyUrl}</div>
-              <button onClick={()=>{setProxyUrl('');setProxyUrlState('');localStorage.removeItem('__smartshop_proxy')}} style={{...s.btn("s"),fontSize:13,color:"#ef4444"}}>Disconnect</button>
-            </div>):(<div>
-              <p style={{fontSize:13,color:"#888",marginBottom:12,lineHeight:1.5}}>Enter your Cloudflare Worker proxy URL. The API key is stored securely on the server — never in the browser.</p>
-              <input style={{...s.inp,fontFamily:"monospace",fontSize:13}} placeholder="https://smartshop-proxy.your-subdomain.workers.dev" value={proxyInput} onChange={e=>setProxyInput(e.target.value)}/>
-              <div style={{display:"flex",gap:8,marginTop:10}}>
-                <button disabled={!proxyInput.startsWith("https://")} onClick={()=>{setProxyUrl(proxyInput);setProxyUrlState(proxyInput);setProxyInput("")}} style={{...s.btn(),flex:1,opacity:proxyInput.startsWith("https://")?1:0.5,fontSize:13}}>Connect</button>
-              </div>
-              <p style={{fontSize:11,color:"#aaa",marginTop:10,lineHeight:1.5}}>See the README for setup instructions. Deploy the included worker.js to Cloudflare Workers (free), set your Anthropic API key as a secret, and paste the URL here.</p>
-            </div>)}
-          </div>
-
           {/* Stats */}
           <div style={{background:"#fff",borderRadius:16,border:"1px solid #f0f0f0",padding:16,marginBottom:16}}>
             <div style={{fontSize:16,fontWeight:700,marginBottom:12}}>Your Data</div>
@@ -441,9 +391,3 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
     </div>
   );
 }
-
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(window.App));
-  </script>
-</body>
-</html>
