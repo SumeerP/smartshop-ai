@@ -263,17 +263,41 @@ export default function App(){
     if(homeFeedInFlight.current||!user||searches.length<2)return;
     homeFeedInFlight.current=true;
     setHomeLoading(true);
-    const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
+    const sys=`Return ONLY valid compact JSON. No markdown, no comments, no trailing commas. Keep strings short.`;
     const recentSearches=searches.slice(-5).join(", ");
-    const prompt=`User: ${user.name}, interests: ${(user.interests||[]).join(",")}, budget: ${user.budget}. Recent searches: ${recentSearches}.
-JSON with: "dealsForYou":[3 products], "trending":[3 queries with shopperCount], "popularPurchases":[3 products], "becauseYouSearched":[{"query":"","products":[1-2]}] for last 2 searches.
-Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","category":"","emoji":"","url":"","deal":true,"dealPct":10,"whyRecommended":""}`;
+    const prompt=`Shopping feed for ${user.name} (interests: ${(user.interests||[]).join(",")}, budget: ${user.budget}). Recent: ${recentSearches}.
+Return JSON: {"dealsForYou":[3 items],"trending":[{"query":"...","shopperCount":N},...],"popularPurchases":[3 items],"becauseYouSearched":[{"query":"...","products":[1-2 items]}]}
+Item format: {"name":"...","price":N,"rating":4.5,"reviews":N,"retailer":"...","category":"...","emoji":"🎧","url":"#","deal":false,"dealPct":0,"whyRecommended":"..."}`;
 
-    callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1200}).then(raw=>{
-      try{
-        let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
-        const si=c.indexOf("{"),ei=c.lastIndexOf("}");
-        const j=JSON.parse(c.slice(si,ei+1));
+    const tryParse=(raw)=>{
+      let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
+      const si=c.indexOf("{"),ei=c.lastIndexOf("}");
+      if(si===-1||ei===-1)throw new Error("No JSON object found");
+      c=c.slice(si,ei+1);
+      // Fix common JSON issues: trailing commas before ] or }
+      c=c.replace(/,\s*([}\]])/g,'$1');
+      return JSON.parse(c);
+    };
+
+    callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1500}).then(raw=>{
+      const j=tryParse(raw);
+      const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+      const deals=mkP(j.dealsForYou);
+      const popular=mkP(j.popularPurchases);
+      const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
+      homeHasData.current=true;
+      homeRecoveryAttempted.current=true;
+      homeDataSearchCount.current=searches.length;
+      setHomeData({deals,trending:j.trending||[],popular,bySearch});
+      setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
+    }).catch(e=>{
+      console.warn("Home feed error, retrying...",e.message);
+      // Retry with simpler prompt
+      const retry=`Return ONLY this JSON structure with real products, nothing else:
+{"dealsForYou":[{"name":"Product","price":29,"rating":4.5,"reviews":100,"retailer":"Amazon","category":"Tech","emoji":"🎧","url":"#","deal":true,"dealPct":15,"whyRecommended":"Great value"}],"trending":[{"query":"wireless earbuds","shopperCount":1200}],"popularPurchases":[{"name":"Product","price":39,"rating":4.3,"reviews":200,"retailer":"Target","category":"Tech","emoji":"🎵","url":"#","deal":false,"dealPct":0,"whyRecommended":"Popular"}],"becauseYouSearched":[{"query":"${searches[searches.length-1]||"products"}","products":[{"name":"Product","price":25,"rating":4.2,"reviews":80,"retailer":"Amazon","category":"General","emoji":"🛍️","url":"#","deal":false,"dealPct":0,"whyRecommended":"Based on search"}]}]}
+Replace example values with real products for: ${recentSearches}. User budget: ${user.budget}. Keep JSON valid, no trailing commas.`;
+      return callAI([{role:"user",content:retry}],sys,{webSearch:false,maxTokens:1500}).then(raw2=>{
+        const j=tryParse(raw2);
         const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
         const deals=mkP(j.dealsForYou);
         const popular=mkP(j.popularPurchases);
@@ -283,8 +307,8 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
         homeDataSearchCount.current=searches.length;
         setHomeData({deals,trending:j.trending||[],popular,bySearch});
         setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
-      }catch(e){console.warn("Home feed parse error",e);}
-    }).catch(e=>{console.warn("Home feed API error",e);}).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
+      });
+    }).catch(e=>{console.warn("Home feed failed after retry",e.message);}).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
   },[user,searches]);
 
   // Trigger home feed: on first load (no data yet), or every 3 new searches
