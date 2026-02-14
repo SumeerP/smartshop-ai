@@ -45,9 +45,10 @@ CRITICAL: Respond with ONLY a valid JSON object. Start with { end with }. No oth
 Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences.`;
 }
 
-async function callAI(messages, sys) {
-  const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2048,system:sys,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})});
+async function callAI(messages, sys, opts={}) {
+  const body={model:"claude-sonnet-4-20250514",max_tokens:opts.maxTokens||2048,system:sys,messages};
+  if(opts.webSearch!==false)body.tools=[{type:"web_search_20250305",name:"web_search"}];
+  const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`API error ${r.status}`);}
   const d=await r.json();return d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
 }
@@ -134,10 +135,10 @@ export default function App(){
       return;
     }
 
-    const nh=[...histRef.current,{role:"user",content:text}];
-    histRef.current=nh;
+    histRef.current=[...histRef.current,{role:"user",content:text}];
+    const recent=histRef.current.slice(-6);
     const sys=buildSystemPrompt(user,searches,prods);
-    callAI(nh,sys).then(raw=>{
+    callAI(recent,sys).then(raw=>{
       const parsed=parseAI(raw);
       histRef.current=[...histRef.current,{role:"assistant",content:raw}];
       searchCache.current[cacheKey]=parsed;
@@ -146,19 +147,20 @@ export default function App(){
     }).catch(e=>{setErr(e.message||"Something went wrong.");histRef.current=histRef.current.slice(0,-1);}).finally(()=>setBusy(false));
   },[user,searches,prods]);
 
-  // --- Home intelligence (ONE batched call, only when needed) ---
+  // --- Home intelligence (ONE batched call, delayed to avoid concurrent API calls) ---
   useEffect(()=>{
     if(!user||searches.length<2||homeLoading)return;
     const needsRefresh=!homeData&&searches.length>=2&&!homeRecoveryAttempted.current;
-    // Skip if we already fetched for this search count, unless homeData is missing
     if(searches.length<=homeDataSearchCount.current&&!needsRefresh)return;
-    if(needsRefresh)homeRecoveryAttempted.current=true;
-    homeDataSearchCount.current=searches.length;
-    setHomeLoading(true);
-    const sys=`You help generate shopping feed data. Respond with ONLY valid JSON. Start with { end with }`;
-    const cats=[...new Set(prods.map(p=>p.cat))].join(", ");
-    const recentSearches=searches.slice(-5).join(", ");
-    const prompt=`User profile: ${user.name}, ${user.gender||""}, ${user.age||""}, skin: ${user.skin||""}, hair: ${user.hair||""}, interests: ${(user.interests||[]).join(",")}. Budget: ${user.budget}.
+    // Delay to let chat API call finish first, avoiding rate limits
+    const timer=setTimeout(()=>{
+      if(needsRefresh)homeRecoveryAttempted.current=true;
+      homeDataSearchCount.current=searches.length;
+      setHomeLoading(true);
+      const sys=`You help generate shopping feed data. Respond with ONLY valid JSON. Start with { end with }`;
+      const cats=[...new Set(prods.map(p=>p.cat))].join(", ");
+      const recentSearches=searches.slice(-5).join(", ");
+      const prompt=`User profile: ${user.name}, ${user.gender||""}, ${user.age||""}, skin: ${user.skin||""}, hair: ${user.hair||""}, interests: ${(user.interests||[]).join(",")}. Budget: ${user.budget}.
 Recent searches: ${recentSearches}. Categories explored: ${cats}.
 
 Generate ONE JSON with:
@@ -169,25 +171,25 @@ Generate ONE JSON with:
 
 Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","category":"","emoji":"","url":"","deal":true,"dealPct":10,"whyRecommended":""}`;
 
-    callAI([{role:"user",content:prompt}],sys).then(raw=>{
-      try{
-        let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
-        const si=c.indexOf("{"),ei=c.lastIndexOf("}");
-        const j=JSON.parse(c.slice(si,ei+1));
-        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
-        const deals=mkP(j.dealsForYou);
-        const popular=mkP(j.popularPurchases);
-        const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
-        setHomeData({deals,trending:j.trending||[],popular,bySearch});
-        setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
-      }catch(e){
-        // On parse failure, roll back the count so next search retries
+      callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1500}).then(raw=>{
+        try{
+          let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
+          const si=c.indexOf("{"),ei=c.lastIndexOf("}");
+          const j=JSON.parse(c.slice(si,ei+1));
+          const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+          const deals=mkP(j.dealsForYou);
+          const popular=mkP(j.popularPurchases);
+          const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
+          setHomeData({deals,trending:j.trending||[],popular,bySearch});
+          setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
+        }catch(e){
+          homeDataSearchCount.current=homeDataSearchCount.current-1;
+        }
+      }).catch(()=>{
         homeDataSearchCount.current=homeDataSearchCount.current-1;
-      }
-    }).catch(()=>{
-      // On network failure, roll back the count so next search retries
-      homeDataSearchCount.current=homeDataSearchCount.current-1;
-    }).finally(()=>setHomeLoading(false));
+      }).finally(()=>setHomeLoading(false));
+    },15000);
+    return ()=>clearTimeout(timer);
   },[user,searches.length]);
 
   const open=p=>{setSel(p);prev.current=pg;setPg("product");};
