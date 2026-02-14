@@ -46,12 +46,14 @@ const Stars=({r,c})=>(<div style={{display:"flex",alignItems:"center",gap:2}}>{[
 const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
 
 // --- Configuration ---
-// IMPORTANT: After deploying your Cloudflare Worker, replace this URL with your actual worker URL.
-// Example: https://smartshop-proxy.your-subdomain.workers.dev
-const PROXY_URL = localStorage.getItem('__smartshop_proxy') || '';
+const PROXY_URL = 'https://smartshop-proxy.smartshop-proxy.workers.dev';
+function getProxyUrl() { return PROXY_URL; }
 
-function getProxyUrl() { return PROXY_URL || localStorage.getItem('__smartshop_proxy') || ''; }
-function setProxyUrl(url) { try { localStorage.setItem('__smartshop_proxy', url); } catch {} }
+// --- Persistence ---
+const STORE_KEYS = { user:'__ss_user', saved:'__ss_saved', buys:'__ss_buys', searches:'__ss_searches', prods:'__ss_prods', viewed:'__ss_viewed', msgs:'__ss_msgs' };
+function loadState(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
+function saveState(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+function clearAllState() { Object.values(STORE_KEYS).forEach(k => { try { localStorage.removeItem(k); } catch {} }); }
 
 // --- AI ---
 function buildSystemPrompt(profile, searches, prods) {
@@ -118,30 +120,37 @@ const Chips=({options,selected,onToggle,multi=true})=>(<div style={{display:"fle
 // ========== MAIN APP ==========
 window.App = function App(){
   // Auth & profile
-  const[user,setUser]=useState(null); // {name,email,gender,age,skin,hair,interests,budget}
+  const[user,setUser]=useState(()=>loadState(STORE_KEYS.user, null));
   const[onboardStep,setOnboardStep]=useState(0);
   const[formData,setFormData]=useState({name:"",email:"",gender:"",age:"",skin:"",hair:"",interests:[],budget:"moderate"});
 
   // App state
   const[pg,setPg]=useState("home");
   const[sel,setSel]=useState(null);
-  const[saved,setSaved]=useState([]);
-  const[viewed,setViewed]=useState([]);
-  const[buys,setBuys]=useState([]);
-  const[msgs,setMsgs]=useState([]);
+  const[saved,setSaved]=useState(()=>loadState(STORE_KEYS.saved, []));
+  const[viewed,setViewed]=useState(()=>loadState(STORE_KEYS.viewed, []));
+  const[buys,setBuys]=useState(()=>loadState(STORE_KEYS.buys, []));
+  const[msgs,setMsgs]=useState(()=>loadState(STORE_KEYS.msgs, []));
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState(null);
-  const[prods,setProds]=useState([]);
-  const[searches,setSearches]=useState([]);
+  const[prods,setProds]=useState(()=>loadState(STORE_KEYS.prods, []));
+  const[searches,setSearches]=useState(()=>loadState(STORE_KEYS.searches, []));
   const[homeData,setHomeData]=useState(null);
   const[homeLoading,setHomeLoading]=useState(false);
-  const[proxyUrl,setProxyUrlState]=useState(()=>getProxyUrl());
-  const[proxyInput,setProxyInput]=useState("");
   const scrollRef=useRef(null);
   const histRef=useRef([]);
   const prev=useRef("home");
   const homeDataSearchCount=useRef(0);
   const searchCache=useRef({});
+
+  // --- Persist state to localStorage ---
+  useEffect(()=>saveState(STORE_KEYS.user, user),[user]);
+  useEffect(()=>saveState(STORE_KEYS.saved, saved),[saved]);
+  useEffect(()=>saveState(STORE_KEYS.viewed, viewed),[viewed]);
+  useEffect(()=>saveState(STORE_KEYS.buys, buys),[buys]);
+  useEffect(()=>saveState(STORE_KEYS.msgs, msgs),[msgs]);
+  useEffect(()=>saveState(STORE_KEYS.prods, prods),[prods]);
+  useEffect(()=>saveState(STORE_KEYS.searches, searches),[searches]);
 
   const msgCount=msgs.length;
   useEffect(()=>{if(scrollRef.current)scrollRef.current.scrollIntoView({behavior:"smooth"});},[msgCount,busy]);
@@ -404,23 +413,6 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <button onClick={()=>{setFormData({...user});setUser(null);setOnboardStep(1)}} style={{...s.btn("s"),marginTop:16,fontSize:13}}>Edit Profile</button>
           </div>
 
-          {/* AI Config */}
-          <div style={{background:"#fff",borderRadius:16,border:proxyUrl?"1px solid #f0f0f0":"2px solid #7c3aed",padding:20,marginBottom:16}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><span style={{color:"#7c3aed"}}><I.Sparkle s={18}/></span><div style={{fontSize:16,fontWeight:700}}>AI Configuration</div></div>
-            {proxyUrl?(<div>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><div style={{width:8,height:8,borderRadius:4,background:"#16a34a"}}/><span style={{fontSize:13,color:"#16a34a",fontWeight:600}}>Connected</span></div>
-              <div style={{fontSize:12,color:"#888",marginBottom:12,wordBreak:"break-all",fontFamily:"monospace",background:"#f5f5f5",padding:"8px 10px",borderRadius:8}}>{proxyUrl}</div>
-              <button onClick={()=>{setProxyUrl('');setProxyUrlState('');localStorage.removeItem('__smartshop_proxy')}} style={{...s.btn("s"),fontSize:13,color:"#ef4444"}}>Disconnect</button>
-            </div>):(<div>
-              <p style={{fontSize:13,color:"#888",marginBottom:12,lineHeight:1.5}}>Enter your Cloudflare Worker proxy URL. The API key is stored securely on the server — never in the browser.</p>
-              <input style={{...s.inp,fontFamily:"monospace",fontSize:13}} placeholder="https://smartshop-proxy.your-subdomain.workers.dev" value={proxyInput} onChange={e=>setProxyInput(e.target.value)}/>
-              <div style={{display:"flex",gap:8,marginTop:10}}>
-                <button disabled={!proxyInput.startsWith("https://")} onClick={()=>{setProxyUrl(proxyInput);setProxyUrlState(proxyInput);setProxyInput("")}} style={{...s.btn(),flex:1,opacity:proxyInput.startsWith("https://")?1:0.5,fontSize:13}}>Connect</button>
-              </div>
-              <p style={{fontSize:11,color:"#aaa",marginTop:10,lineHeight:1.5}}>See the README for setup instructions. Deploy the included worker.js to Cloudflare Workers (free), set your Anthropic API key as a secret, and paste the URL here.</p>
-            </div>)}
-          </div>
-
           {/* Stats */}
           <div style={{background:"#fff",borderRadius:16,border:"1px solid #f0f0f0",padding:16,marginBottom:16}}>
             <div style={{fontSize:16,fontWeight:700,marginBottom:12}}>Your Data</div>
@@ -430,8 +422,8 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Cached searches: {Object.keys(searchCache.current).length}</div>
           </div>
 
-          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};setErr(null)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
-          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
+          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};setErr(null);clearAllState();saveState(STORE_KEYS.user,user)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
+          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};clearAllState()}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
           <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v2.0</div>
         </div>
       </>)}
