@@ -107,7 +107,8 @@ export default function App(){
   const scrollRef=useRef(null);
   const histRef=useRef([]);
   const prev=useRef("home");
-  const homeDataSearchCount=useRef(0);
+  const homeDataSearchCount=useRef(searches.length||0);
+  const homeRecoveryAttempted=useRef(false);
   const searchCache=useRef({});
 
   const msgCount=msgs.length;
@@ -147,7 +148,11 @@ export default function App(){
 
   // --- Home intelligence (ONE batched call, only when needed) ---
   useEffect(()=>{
-    if(!user||searches.length<2||searches.length<=homeDataSearchCount.current||homeLoading)return;
+    if(!user||searches.length<2||homeLoading)return;
+    const needsRefresh=!homeData&&searches.length>=2&&!homeRecoveryAttempted.current;
+    // Skip if we already fetched for this search count, unless homeData is missing
+    if(searches.length<=homeDataSearchCount.current&&!needsRefresh)return;
+    if(needsRefresh)homeRecoveryAttempted.current=true;
     homeDataSearchCount.current=searches.length;
     setHomeLoading(true);
     const sys=`You help generate shopping feed data. Respond with ONLY valid JSON. Start with { end with }`;
@@ -167,17 +172,23 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
     callAI([{role:"user",content:prompt}],sys).then(raw=>{
       try{
         let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
-        const s=c.indexOf("{"),e=c.lastIndexOf("}");
-        const j=JSON.parse(c.slice(s,e+1));
+        const si=c.indexOf("{"),ei=c.lastIndexOf("}");
+        const j=JSON.parse(c.slice(si,ei+1));
         const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
         const deals=mkP(j.dealsForYou);
         const popular=mkP(j.popularPurchases);
         const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
         setHomeData({deals,trending:j.trending||[],popular,bySearch});
         setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
-      }catch(e){}
-    }).catch(()=>{}).finally(()=>setHomeLoading(false));
-  },[user,searches.length,prods.length]);
+      }catch(e){
+        // On parse failure, roll back the count so next search retries
+        homeDataSearchCount.current=homeDataSearchCount.current-1;
+      }
+    }).catch(()=>{
+      // On network failure, roll back the count so next search retries
+      homeDataSearchCount.current=homeDataSearchCount.current-1;
+    }).finally(()=>setHomeLoading(false));
+  },[user,searches.length]);
 
   const open=p=>{setSel(p);prev.current=pg;setPg("product");};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
@@ -380,8 +391,8 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Cached searches: {Object.keys(searchCache.current).length}</div>
           </div>
 
-          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};setErr(null)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
-          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
+          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
+          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
           <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v2.0</div>
         </div>
       </>)}
