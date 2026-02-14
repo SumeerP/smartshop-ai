@@ -88,8 +88,8 @@ USER PROFILE:
 - Hair type: ${profile.hair||"not specified"}
 - Interests: ${(profile.interests||[]).join(", ")||"not specified"}
 - Budget: ${profile.budget||"moderate"}
-- Past searches: ${searches.slice(-10).join(", ")||"none yet"}
-- Products explored: ${prods.slice(-8).map(p=>p.name).join(", ")||"none yet"}
+- Past searches: ${searches.slice(-5).join(", ")||"none yet"}
+- Products explored: ${prods.slice(-4).map(p=>p.name).join(", ")||"none yet"}
 Use this profile to personalize every recommendation. Reference their preferences naturally.` : "";
   return `You are SmartShop AI, a personal shopping assistant.${pref}
 
@@ -326,7 +326,7 @@ window.App = function App(){
     }
 
     histRef.current=[...histRef.current,{role:"user",content:text}];
-    const recent=histRef.current.slice(-6);
+    const recent=histRef.current.slice(-4);
     const sys=buildSystemPrompt(user,searches,prods);
     callAI(recent,sys).then(raw=>{
       const parsed=parseAI(raw);
@@ -337,31 +337,25 @@ window.App = function App(){
     }).catch(e=>{setErr(e.message||"Something went wrong.");histRef.current=histRef.current.slice(0,-1);}).finally(()=>setBusy(false));
   },[user,searches,prods,activeThreadId,threads.length]);
 
-  // --- Home intelligence (ONE batched call, delayed to avoid concurrent API calls) ---
+  // --- Home intelligence (fires only every 3 new searches, or on recovery, delayed 30s) ---
   useEffect(()=>{
-    if(!user||searches.length<2||homeLoading)return;
+    if(!user||searches.length<2||homeLoading||busy)return;
     const needsRefresh=!homeData&&searches.length>=2&&!homeRecoveryAttempted.current;
-    if(searches.length<=homeDataSearchCount.current&&!needsRefresh)return;
-    // Delay to let chat API call finish first, avoiding rate limits
+    const newSinceLastFeed=searches.length-homeDataSearchCount.current;
+    if(!needsRefresh&&newSinceLastFeed<3)return;
+    // Delay 30s to let any chat API call finish first
     const timer=setTimeout(()=>{
+      if(busy)return; // double-check: don't fire while a chat call is in progress
       if(needsRefresh)homeRecoveryAttempted.current=true;
       homeDataSearchCount.current=searches.length;
       setHomeLoading(true);
-      const sys=`You help generate shopping feed data. Respond with ONLY valid JSON. Start with { end with }`;
-      const cats=[...new Set(prods.map(p=>p.cat))].join(", ");
+      const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
       const recentSearches=searches.slice(-5).join(", ");
-      const prompt=`User profile: ${user.name}, ${user.gender||""}, ${user.age||""}, skin: ${user.skin||""}, hair: ${user.hair||""}, interests: ${(user.interests||[]).join(",")}. Budget: ${user.budget}.
-Recent searches: ${recentSearches}. Categories explored: ${cats}.
+      const prompt=`User: ${user.name}, interests: ${(user.interests||[]).join(",")}, budget: ${user.budget}. Recent searches: ${recentSearches}.
+JSON with: "dealsForYou":[3 products], "trending":[3 queries with shopperCount], "popularPurchases":[3 products], "becauseYouSearched":[{"query":"","products":[1-2]}] for last 2 searches.
+Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","category":"","emoji":"","url":"","deal":true,"dealPct":10,"whyRecommended":""}`;
 
-Generate ONE JSON with:
-1. "dealsForYou": 3-4 products with deals relevant to this user's interests and searches (include ALL interest areas, not just the last search)
-2. "trending": 3-4 trending search queries similar shoppers are doing, with shopperCount
-3. "popularPurchases": 3-4 products popular with similar shoppers
-4. "becauseYouSearched": [{"query":"original search","products":[1-2 related products]}] for the last 2-3 searches
-
-Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","category":"","emoji":"","url":"","deal":true,"dealPct":10,"whyRecommended":""}`;
-
-      callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1500}).then(raw=>{
+      callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1200}).then(raw=>{
         try{
           let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
           const si=c.indexOf("{"),ei=c.lastIndexOf("}");
@@ -378,9 +372,9 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
       }).catch(()=>{
         homeDataSearchCount.current=homeDataSearchCount.current-1;
       }).finally(()=>setHomeLoading(false));
-    },15000);
+    },30000);
     return ()=>clearTimeout(timer);
-  },[user,searches.length]);
+  },[user,searches.length,busy]);
 
   const open=p=>{setSel(p);prev.current=pg;setPg("product");};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
