@@ -347,17 +347,24 @@ window.App = function App(){
     }).catch(e=>{setErr(e.message||"Something went wrong.");histRef.current=histRef.current.slice(0,-1);}).finally(()=>setBusy(false));
   },[user,searches,prods,activeThreadId,threads.length]);
 
-  // --- Home intelligence (fires only every 3 new searches, or on recovery, delayed 30s) ---
+  // --- Home intelligence ---
+  const homeFeedTimer=useRef(null);
+  const homeFeedInFlight=useRef(false);
   useEffect(()=>{
-    if(!user||searches.length<2||homeLoading||busy)return;
-    const needsRefresh=!homeData&&searches.length>=2&&!homeRecoveryAttempted.current;
+    if(!user||searches.length<2)return;
+    const isFirstFeed=!homeData&&!homeRecoveryAttempted.current;
     const newSinceLastFeed=searches.length-homeDataSearchCount.current;
-    if(!needsRefresh&&newSinceLastFeed<3)return;
-    // Delay 30s to let any chat API call finish first
-    const timer=setTimeout(()=>{
-      if(busy)return; // double-check: don't fire while a chat call is in progress
-      if(needsRefresh)homeRecoveryAttempted.current=true;
+    if(!isFirstFeed&&newSinceLastFeed<3)return;
+    // Cancel any existing timer before scheduling new one
+    if(homeFeedTimer.current)clearTimeout(homeFeedTimer.current);
+    // First feed fires after 5s, refreshes after 30s
+    const delay=isFirstFeed?5000:30000;
+    homeFeedTimer.current=setTimeout(()=>{
+      homeFeedTimer.current=null;
+      if(homeFeedInFlight.current)return;
+      homeRecoveryAttempted.current=true;
       homeDataSearchCount.current=searches.length;
+      homeFeedInFlight.current=true;
       setHomeLoading(true);
       const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
       const recentSearches=searches.slice(-5).join(", ");
@@ -381,10 +388,10 @@ Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","c
         }
       }).catch(()=>{
         homeDataSearchCount.current=homeDataSearchCount.current-1;
-      }).finally(()=>setHomeLoading(false));
-    },30000);
-    return ()=>clearTimeout(timer);
-  },[user,searches.length,busy]);
+      }).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
+    },delay);
+    return ()=>{if(homeFeedTimer.current){clearTimeout(homeFeedTimer.current);homeFeedTimer.current=null;}};
+  },[user,searches.length]);
 
   const open=p=>{setSel(p);prevStack.current.push(pg);setPg("product");};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
