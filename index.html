@@ -50,7 +50,7 @@ const PROXY_URL = 'https://smartshop-proxy.smartshop-proxy.workers.dev';
 function getProxyUrl() { return PROXY_URL; }
 
 // --- Persistence ---
-const STORE_KEYS = { user:'__ss_user', saved:'__ss_saved', buys:'__ss_buys', searches:'__ss_searches', prods:'__ss_prods', viewed:'__ss_viewed', msgs:'__ss_msgs' };
+const STORE_KEYS = { user:'__ss_user', saved:'__ss_saved', buys:'__ss_buys', searches:'__ss_searches', prods:'__ss_prods', viewed:'__ss_viewed', msgs:'__ss_msgs', homeData:'__ss_home' };
 function loadState(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
 function saveState(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 function clearAllState() { Object.values(STORE_KEYS).forEach(k => { try { localStorage.removeItem(k); } catch {} }); }
@@ -135,7 +135,7 @@ window.App = function App(){
   const[err,setErr]=useState(null);
   const[prods,setProds]=useState(()=>loadState(STORE_KEYS.prods, []));
   const[searches,setSearches]=useState(()=>loadState(STORE_KEYS.searches, []));
-  const[homeData,setHomeData]=useState(null);
+  const[homeData,setHomeData]=useState(()=>loadState(STORE_KEYS.homeData, null));
   const[homeLoading,setHomeLoading]=useState(false);
   const scrollRef=useRef(null);
   const histRef=useRef([]);
@@ -151,6 +151,7 @@ window.App = function App(){
   useEffect(()=>saveState(STORE_KEYS.msgs, msgs),[msgs]);
   useEffect(()=>saveState(STORE_KEYS.prods, prods),[prods]);
   useEffect(()=>saveState(STORE_KEYS.searches, searches),[searches]);
+  useEffect(()=>saveState(STORE_KEYS.homeData, homeData),[homeData]);
 
   const msgCount=msgs.length;
   useEffect(()=>{if(scrollRef.current)scrollRef.current.scrollIntoView({behavior:"smooth"});},[msgCount,busy]);
@@ -424,7 +425,7 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
 
           <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};setErr(null);clearAllState();saveState(STORE_KEYS.user,user)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
           <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;searchCache.current={};clearAllState()}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
-          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v2.0</div>
+          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v3.0</div>
         </div>
       </>)}
 
