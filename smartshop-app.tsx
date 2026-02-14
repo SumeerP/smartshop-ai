@@ -131,7 +131,7 @@ export default function App(){
   const scrollRef=useRef(null);
   const histRef=useRef([]);
   const prevStack=useRef([]);
-  const homeDataSearchCount=useRef(0);
+  const homeDataSearchCount=useRef(searches.length||0);
   const homeRecoveryAttempted=useRef(false);
   const searchCache=useRef({});
   const threadDataRef=useRef({});
@@ -258,46 +258,52 @@ export default function App(){
   // --- Home intelligence ---
   const homeFeedTimer=useRef(null);
   const homeFeedInFlight=useRef(false);
-  useEffect(()=>{
-    if(!user||searches.length<2)return;
-    const isFirstFeed=!homeData&&!homeRecoveryAttempted.current;
-    const newSinceLastFeed=searches.length-homeDataSearchCount.current;
-    if(!isFirstFeed&&newSinceLastFeed<3)return;
-    if(homeFeedTimer.current)clearTimeout(homeFeedTimer.current);
-    const delay=isFirstFeed?5000:30000;
-    homeFeedTimer.current=setTimeout(()=>{
-      homeFeedTimer.current=null;
-      if(homeFeedInFlight.current)return;
-      homeRecoveryAttempted.current=true;
-      homeDataSearchCount.current=searches.length;
-      homeFeedInFlight.current=true;
-      setHomeLoading(true);
-      const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
-      const recentSearches=searches.slice(-5).join(", ");
-      const prompt=`User: ${user.name}, interests: ${(user.interests||[]).join(",")}, budget: ${user.budget}. Recent searches: ${recentSearches}.
+  const homeHasData=useRef(!!homeData);
+  const fireHomeFeed=useCallback(()=>{
+    if(homeFeedInFlight.current||!user||searches.length<2)return;
+    homeFeedInFlight.current=true;
+    homeRecoveryAttempted.current=true;
+    homeDataSearchCount.current=searches.length;
+    setHomeLoading(true);
+    const sys=`Generate shopping feed JSON. Only JSON, no other text.`;
+    const recentSearches=searches.slice(-5).join(", ");
+    const prompt=`User: ${user.name}, interests: ${(user.interests||[]).join(",")}, budget: ${user.budget}. Recent searches: ${recentSearches}.
 JSON with: "dealsForYou":[3 products], "trending":[3 queries with shopperCount], "popularPurchases":[3 products], "becauseYouSearched":[{"query":"","products":[1-2]}] for last 2 searches.
 Product format: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","category":"","emoji":"","url":"","deal":true,"dealPct":10,"whyRecommended":""}`;
 
-      callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1200}).then(raw=>{
-        try{
-          let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
-          const si=c.indexOf("{"),ei=c.lastIndexOf("}");
-          const j=JSON.parse(c.slice(si,ei+1));
-          const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
-          const deals=mkP(j.dealsForYou);
-          const popular=mkP(j.popularPurchases);
-          const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
-          setHomeData({deals,trending:j.trending||[],popular,bySearch});
-          setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
-        }catch(e){
-          homeDataSearchCount.current=homeDataSearchCount.current-1;
-        }
-      }).catch(()=>{
+    callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1200}).then(raw=>{
+      try{
+        let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
+        const si=c.indexOf("{"),ei=c.lastIndexOf("}");
+        const j=JSON.parse(c.slice(si,ei+1));
+        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+        const deals=mkP(j.dealsForYou);
+        const popular=mkP(j.popularPurchases);
+        const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
+        homeHasData.current=true;
+        setHomeData({deals,trending:j.trending||[],popular,bySearch});
+        setProds(p=>[...p,...deals,...popular,...bySearch.flatMap(b=>b.products)]);
+      }catch(e){
         homeDataSearchCount.current=homeDataSearchCount.current-1;
-      }).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
+      }
+    }).catch(()=>{
+      homeDataSearchCount.current=homeDataSearchCount.current-1;
+    }).finally(()=>{setHomeLoading(false);homeFeedInFlight.current=false;});
+  },[user,searches]);
+
+  useEffect(()=>{
+    if(!user||searches.length<2)return;
+    const needsFirst=!homeHasData.current&&!homeRecoveryAttempted.current;
+    const newSinceLastFeed=searches.length-homeDataSearchCount.current;
+    if(!needsFirst&&newSinceLastFeed<3)return;
+    if(homeFeedTimer.current)clearTimeout(homeFeedTimer.current);
+    const delay=needsFirst?5000:30000;
+    homeFeedTimer.current=setTimeout(()=>{
+      homeFeedTimer.current=null;
+      fireHomeFeed();
     },delay);
     return ()=>{if(homeFeedTimer.current){clearTimeout(homeFeedTimer.current);homeFeedTimer.current=null;}};
-  },[user,searches.length]);
+  },[user,searches.length,fireHomeFeed]);
 
   const open=p=>{setSel(p);prevStack.current.push(pg);setPg("product");};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
