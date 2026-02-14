@@ -20,9 +20,16 @@ const I={
   Users:({s=18})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
   User:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
   ChevR:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9,18 15,12 9,6"/></svg>,
+  Menu:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>,
+  Plus:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
 };
 const Stars=({r,c})=>(<div style={{display:"flex",alignItems:"center",gap:2}}>{[1,2,3,4,5].map(i=><I.Star key={i} f={i<=Math.round(r)}/>)}<span style={{fontSize:11,color:"#888",marginLeft:4}}>{r}{c?` (${c})`:""}</span></div>);
 const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
+
+// --- Thread helpers (in-memory only for tsx) ---
+const MAX_THREADS=20;
+function newThreadId(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
+function createThread(name){return{id:newThreadId(),name:name||"New Chat",createdAt:Date.now(),updatedAt:Date.now()};}
 
 // --- AI (built-in, no key needed) ---
 function buildSystemPrompt(profile, searches, prods) {
@@ -88,7 +95,7 @@ const Chips=({options,selected,onToggle,multi=true})=>(<div style={{display:"fle
 // ========== MAIN APP ==========
 export default function App(){
   // Auth & profile
-  const[user,setUser]=useState(null); // {name,email,gender,age,skin,hair,interests,budget}
+  const[user,setUser]=useState(null);
   const[onboardStep,setOnboardStep]=useState(0);
   const[formData,setFormData]=useState({name:"",email:"",gender:"",age:"",skin:"",hair:"",interests:[],budget:"moderate"});
 
@@ -98,19 +105,91 @@ export default function App(){
   const[saved,setSaved]=useState([]);
   const[viewed,setViewed]=useState([]);
   const[buys,setBuys]=useState([]);
-  const[msgs,setMsgs]=useState([]);
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState(null);
   const[prods,setProds]=useState([]);
   const[searches,setSearches]=useState([]);
   const[homeData,setHomeData]=useState(null);
   const[homeLoading,setHomeLoading]=useState(false);
+
+  // Thread state (in-memory only for tsx)
+  const[threads,setThreads]=useState([]);
+  const[activeThreadId,setActiveThreadId]=useState(null);
+  const[msgs,setMsgs]=useState([]);
+  const[showThreadList,setShowThreadList]=useState(false);
+
   const scrollRef=useRef(null);
   const histRef=useRef([]);
   const prev=useRef("home");
-  const homeDataSearchCount=useRef(searches.length||0);
+  const homeDataSearchCount=useRef(0);
   const homeRecoveryAttempted=useRef(false);
   const searchCache=useRef({});
+  const threadDataRef=useRef({});
+
+  // Thread operations
+  const switchThread=useCallback((id)=>{
+    if(id===activeThreadId||busy)return;
+    if(activeThreadId){
+      threadDataRef.current[activeThreadId]={msgs,hist:[...histRef.current],cache:{...searchCache.current}};
+    }
+    const td=threadDataRef.current[id]||{msgs:[],hist:[],cache:{}};
+    setMsgs(td.msgs||[]);
+    histRef.current=td.hist||[];
+    searchCache.current=td.cache||{};
+    setActiveThreadId(id);
+    setErr(null);
+    setShowThreadList(false);
+  },[activeThreadId,busy,msgs]);
+
+  const newThread=useCallback(()=>{
+    if(busy)return;
+    if(threads.length>=MAX_THREADS)return;
+    if(activeThreadId){
+      threadDataRef.current[activeThreadId]={msgs,hist:[...histRef.current],cache:{...searchCache.current}};
+    }
+    const t=createThread();
+    setThreads(p=>[...p,t]);
+    setMsgs([]);
+    histRef.current=[];
+    searchCache.current={};
+    setActiveThreadId(t.id);
+    setErr(null);
+    setShowThreadList(false);
+    return t;
+  },[activeThreadId,busy,msgs,threads.length]);
+
+  const deleteThreadById=useCallback((id)=>{
+    if(busy)return;
+    setThreads(p=>{
+      const next=p.filter(t=>t.id!==id);
+      if(id===activeThreadId){
+        if(next.length>0){
+          const last=next[next.length-1];
+          const td=threadDataRef.current[last.id]||{msgs:[],hist:[],cache:{}};
+          setMsgs(td.msgs||[]);
+          histRef.current=td.hist||[];
+          searchCache.current=td.cache||{};
+          setActiveThreadId(last.id);
+        }else{
+          const t=createThread();
+          next.push(t);
+          setMsgs([]);
+          histRef.current=[];
+          searchCache.current={};
+          setActiveThreadId(t.id);
+        }
+      }
+      delete threadDataRef.current[id];
+      return next;
+    });
+  },[activeThreadId,busy]);
+
+  const renameThread=useCallback((id,name)=>{
+    if(!name)return;
+    setThreads(p=>p.map(t=>t.id===id?{...t,name:name.slice(0,40)}:t));
+  },[]);
+
+  const activeThread=threads.find(t=>t.id===activeThreadId);
 
   const msgCount=msgs.length;
   useEffect(()=>{if(scrollRef.current)scrollRef.current.scrollIntoView({behavior:"smooth"});},[msgCount,busy]);
@@ -121,6 +200,24 @@ export default function App(){
   // --- Chat send ---
   const handleSend=useCallback((text)=>{
     setErr(null);
+
+    // Ensure a thread exists
+    let tid=activeThreadId;
+    if(!tid||threads.length===0){
+      const t=createThread();
+      setThreads(p=>[...p,t]);
+      setActiveThreadId(t.id);
+      tid=t.id;
+    }
+
+    // Auto-name thread if it's still "New Chat"
+    setThreads(p=>p.map(t=>{
+      if(t.id===tid&&t.name==="New Chat"){
+        return{...t,name:text.slice(0,40),updatedAt:Date.now()};
+      }
+      return t.id===tid?{...t,updatedAt:Date.now()}:t;
+    }));
+
     setMsgs(p=>[...p,{role:"user",text}]);
     setSearches(p=>[...p,text]);
     setBusy(true);
@@ -145,7 +242,7 @@ export default function App(){
       if(parsed.products.length>0){setProds(p=>[...p,...parsed.products]);parsed.products.forEach(pr=>setViewed(p=>p.includes(pr.id)?p:[pr.id,...p]));}
       setMsgs(p=>[...p,{role:"ai",...parsed}]);
     }).catch(e=>{setErr(e.message||"Something went wrong.");histRef.current=histRef.current.slice(0,-1);}).finally(()=>setBusy(false));
-  },[user,searches,prods]);
+  },[user,searches,prods,activeThreadId,threads.length]);
 
   // --- Home intelligence (ONE batched call, delayed to avoid concurrent API calls) ---
   useEffect(()=>{
@@ -277,11 +374,42 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
   // ========== MAIN APP ==========
   return(
     <div style={s.app}>
+      {/* THREAD DRAWER */}
+      {showThreadList&&pg==="chat"&&(<>
+        <div onClick={()=>setShowThreadList(false)} style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.3)",zIndex:200}}/>
+        <div style={{position:"fixed",top:0,left:0,bottom:0,width:280,background:"#fff",zIndex:210,display:"flex",flexDirection:"column",boxShadow:"2px 0 12px rgba(0,0,0,0.1)"}}>
+          <div style={{padding:"16px 16px 12px",borderBottom:"1px solid #f0f0f0",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <span style={{fontSize:17,fontWeight:700}}>Chats</span>
+            <div style={{display:"flex",gap:8}}>
+              <div onClick={()=>{if(threads.length>=MAX_THREADS)return;newThread();setPg("chat");}} style={{width:32,height:32,borderRadius:16,background:threads.length>=MAX_THREADS?"#f5f5f5":"#000",color:threads.length>=MAX_THREADS?"#ccc":"#fff",display:"flex",alignItems:"center",justifyContent:"center",cursor:threads.length>=MAX_THREADS?"default":"pointer"}}><I.Plus s={16}/></div>
+            </div>
+          </div>
+          {threads.length>=MAX_THREADS&&<div style={{padding:"6px 16px",fontSize:11,color:"#ef4444",background:"#fef2f2"}}>Maximum {MAX_THREADS} threads reached</div>}
+          <div style={{flex:1,overflowY:"auto"}}>
+            {[...threads].sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0)).map(t=>(
+              <div key={t.id} onClick={()=>switchThread(t.id)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",cursor:"pointer",background:t.id===activeThreadId?"#f8f5ff":"transparent",borderLeft:t.id===activeThreadId?"3px solid #7c3aed":"3px solid transparent"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:14,fontWeight:t.id===activeThreadId?600:400,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.name}</div>
+                  <div style={{fontSize:11,color:"#999",marginTop:2}}>{new Date(t.updatedAt||t.createdAt).toLocaleDateString()}</div>
+                </div>
+                {threads.length>1&&<div onClick={e=>{e.stopPropagation();deleteThreadById(t.id);}} style={{width:24,height:24,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",color:"#ccc",flexShrink:0,marginLeft:8}}><I.X s={14}/></div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </>)}
+
       {/* CHAT */}
       {pg==="chat"&&(<div style={{display:"flex",flexDirection:"column",height:"100vh"}}>
         <div style={{...s.hd,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{color:"#7c3aed"}}><I.Sparkle s={22}/></span><div><div style={{fontSize:17,fontWeight:700}}>Shopping Assistant</div><div style={{fontSize:11,color:"#999"}}>Personalized for {user.name}</div></div></div>
-          <div onClick={()=>setPg("home")} style={{width:36,height:36,borderRadius:18,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><I.X s={18}/></div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div onClick={()=>setShowThreadList(true)} style={{width:36,height:36,borderRadius:18,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><I.Menu s={18}/></div>
+            <div onClick={()=>{const n=window.prompt("Rename thread:",activeThread?.name||"");if(n&&n.trim()&&activeThreadId)renameThread(activeThreadId,n.trim());}} style={{cursor:"pointer"}}><div style={{fontSize:17,fontWeight:700,maxWidth:180,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{activeThread?.name||"New Chat"}</div><div style={{fontSize:11,color:"#999"}}>{user.name}</div></div>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <div onClick={()=>{if(threads.length<MAX_THREADS)newThread();}} style={{width:36,height:36,borderRadius:18,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",cursor:threads.length>=MAX_THREADS?"default":"pointer",color:threads.length>=MAX_THREADS?"#ccc":"#1a1a1a"}}><I.Plus s={18}/></div>
+            <div onClick={()=>{setShowThreadList(false);setPg("home");}} style={{width:36,height:36,borderRadius:18,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><I.X s={18}/></div>
+          </div>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
           {msgs.length===0&&(<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"55vh",gap:14,paddingBottom:40}}>
@@ -313,7 +441,7 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5}}>SmartShop</div>
             <div onClick={()=>setPg("settings")} style={{width:32,height:32,borderRadius:16,background:"#f5f5f5",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><I.User s={16}/></div>
           </div>
-          <div onClick={()=>setPg("chat")} style={{display:"flex",alignItems:"center",background:"#f5f5f5",borderRadius:14,padding:"12px 16px",gap:10,marginTop:12,cursor:"pointer"}}><I.Search s={18}/><span style={{fontSize:15,color:"#999"}}>Hi {user.name}, what are you looking for?</span></div>
+          <div onClick={()=>{if(msgs.length>0&&threads.length<MAX_THREADS){newThread();}setPg("chat");}} style={{display:"flex",alignItems:"center",background:"#f5f5f5",borderRadius:14,padding:"12px 16px",gap:10,marginTop:12,cursor:"pointer"}}><I.Search s={18}/><span style={{fontSize:15,color:"#999"}}>Hi {user.name}, what are you looking for?</span></div>
         </div>
 
         {/* Deals for You */}
@@ -327,7 +455,7 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
         {/* Similar Shoppers Trending */}
         {homeData?.trending?.length>0&&<div style={s.sec}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><I.Users s={18}/><span style={s.st}>Similar Shoppers Are Searching</span></div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>{homeData.trending.slice(0,4).map((t,i)=>(<div key={i} onClick={()=>{setPg("chat");setTimeout(()=>handleSend(t.query),100)}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#fff",borderRadius:12,padding:"11px 14px",border:"1px solid #f0f0f0",cursor:"pointer"}}><div style={{display:"flex",alignItems:"center",gap:8}}><I.Search s={14}/><span style={{fontSize:13,fontWeight:500}}>{t.query}</span></div><span style={{fontSize:11,color:"#7c3aed",fontWeight:600}}>{(t.shopperCount||0).toLocaleString()}</span></div>))}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>{homeData.trending.slice(0,4).map((t,i)=>(<div key={i} onClick={()=>{if(msgs.length>0&&threads.length<MAX_THREADS){newThread();}setPg("chat");setTimeout(()=>handleSend(t.query),100);}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#fff",borderRadius:12,padding:"11px 14px",border:"1px solid #f0f0f0",cursor:"pointer"}}><div style={{display:"flex",alignItems:"center",gap:8}}><I.Search s={14}/><span style={{fontSize:13,fontWeight:500}}>{t.query}</span></div><span style={{fontSize:11,color:"#7c3aed",fontWeight:600}}>{(t.shopperCount||0).toLocaleString()}</span></div>))}</div>
         </div>}
 
         {/* Popular with similar shoppers */}
@@ -389,13 +517,14 @@ Each product: {"name":"","price":0,"rating":4.5,"reviews":100,"retailer":"","cat
             <div style={{fontSize:16,fontWeight:700,marginBottom:12}}>Your Data</div>
             <div style={{fontSize:14,color:"#555",padding:"6px 0"}}>Products discovered: {prods.length}</div>
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Searches: {searches.length}</div>
-            <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Messages: {msgs.length}</div>
+            <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Threads: {threads.length}</div>
+            <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Messages (current thread): {msgs.length}</div>
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Cached searches: {Object.keys(searchCache.current).length}</div>
           </div>
 
-          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null)}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
-          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
-          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v2.0</div>
+          <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null);threadDataRef.current={};const t=createThread();setThreads([t]);setActiveThreadId(t.id);}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
+          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};threadDataRef.current={};setThreads([]);setActiveThreadId(null);}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
+          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v4.0</div>
         </div>
       </>)}
 
