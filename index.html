@@ -44,6 +44,9 @@ const I={
   Menu:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>,
   Plus:({s=20})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
   Compare:({s=18})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>,
+  CartPlus:({s=18})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="10" y1="11" x2="14" y2="11"/></svg>,
+  ChevD:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6,9 12,15 18,9"/></svg>,
+  StarFill:({s=14})=><svg width={s} height={s} viewBox="0 0 24 24" fill="#f59e0b" stroke="#f59e0b" strokeWidth="1"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>,
 };
 const Stars=({r,c})=>(<div style={{display:"flex",alignItems:"center",gap:2}}>{[1,2,3,4,5].map(i=><I.Star key={i} f={i<=Math.round(r)}/>)}<span style={{fontSize:11,color:"#888",marginLeft:4}}>{r}{c?` (${c})`:""}</span></div>);
 const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
@@ -95,8 +98,8 @@ Use this profile to personalize every recommendation. Reference their preference
   return `You are SmartShop AI, a personal shopping assistant.${pref}
 
 CRITICAL: Respond with ONLY a valid JSON object. Start with { end with }. No other text.
-{"message":"Conversational response with **bold**","products":[{"name":"Name","price":29.99,"rating":4.5,"reviews":1234,"retailer":"Amazon","category":"Electronics","emoji":"🎧","url":"https://amazon.com","deal":false,"dealPct":0,"whyRecommended":"Reason"}],"followUpQuestion":"Question","searchQueries":["q1","q2"]}
-Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences.`;
+{"message":"Conversational response with **bold**","products":[{"name":"Name","price":29.99,"rating":4.5,"reviews":1234,"retailer":"Amazon","category":"Electronics","emoji":"🎧","url":"https://amazon.com/dp/B0XXXXX","asin":"B0XXXXX","imageUrl":"https://m.media-amazon.com/images/I/XXXXX._AC_SX200_.jpg","deal":false,"dealPct":0,"whyRecommended":"Reason"}],"followUpQuestion":"Question","searchQueries":["q1","q2"]}
+Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences. IMPORTANT: For Amazon products, include a real ASIN and a real Amazon product image URL (m.media-amazon.com). For other retailers, omit asin and imageUrl.`;
 }
 
 function needsWebSearch(text){
@@ -122,7 +125,7 @@ function parseAI(raw){
     let depth=0,end=start;
     for(let i=start;i<c.length;i++){if(c[i]==="{")depth++;else if(c[i]==="}"){depth--;if(depth===0){end=i;break;}}}
     const j=JSON.parse(c.slice(start,end+1));
-    return{msg:j.message||"Here are recommendations:",products:(j.products||[]).map((p,i)=>({id:`ai-${Date.now()}-${i}`,name:p.name||"Product",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""})),followUp:j.followUpQuestion||null,suggestions:j.searchQueries||[]};
+    return{msg:j.message||"Here are recommendations:",products:(j.products||[]).map((p,i)=>({id:`ai-${Date.now()}-${i}`,name:p.name||"Product",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""})),followUp:j.followUpQuestion||null,suggestions:j.searchQueries||[]};
   }catch(e){
     let cl=raw.replace(/```[\s\S]*?```/gi,"").replace(/\{[\s\S]*\}/g,"").trim();
     if(!cl||cl.length<10)cl="Please try again.";
@@ -188,6 +191,16 @@ window.App = function App(){
   const[compareIds,setCompareIds]=useState([]);
   const[showCompare,setShowCompare]=useState(false);
   const togCompare=id=>setCompareIds(p=>p.includes(id)?p.filter(x=>x!==id):p.length>=3?p:[...p,id]);
+
+  // Product detail: reviews & details
+  const[productReviews,setProductReviews]=useState(null);
+  const[reviewsLoading,setReviewsLoading]=useState(false);
+  const[productDetails,setProductDetails]=useState(null);
+  const[detailsLoading,setDetailsLoading]=useState(false);
+  const[showDetails,setShowDetails]=useState(false);
+  const[showReviews,setShowReviews]=useState(false);
+  const reviewsCache=useRef({});
+  const detailsCache=useRef({});
 
   const scrollRef=useRef(null);
   const histRef=useRef(null);
@@ -373,7 +386,7 @@ Item format: {"name":"...","price":N,"rating":4.5,"reviews":N,"retailer":"...","
 
     callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1500}).then(raw=>{
       const j=tryParse(raw);
-      const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+      const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
       const deals=mkP(j.dealsForYou);
       const popular=mkP(j.popularPurchases);
       const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
@@ -390,7 +403,7 @@ Item format: {"name":"...","price":N,"rating":4.5,"reviews":N,"retailer":"...","
 Replace example values with real products for: ${recentSearches}. User budget: ${user.budget}. Keep JSON valid, no trailing commas.`;
       return callAI([{role:"user",content:retry}],sys,{webSearch:false,maxTokens:1500}).then(raw2=>{
         const j=tryParse(raw2);
-        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
         const deals=mkP(j.dealsForYou);
         const popular=mkP(j.popularPurchases);
         const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
@@ -416,9 +429,43 @@ Replace example values with real products for: ${recentSearches}. User budget: $
     return ()=>{if(homeFeedTimer.current){clearTimeout(homeFeedTimer.current);homeFeedTimer.current=null;}};
   },[user,searches.length,fireHomeFeed]);
 
-  const open=p=>{setSel(p);prevStack.current.push(pg);setPg("product");};
+  const open=p=>{setSel(p);prevStack.current.push(pg);setPg("product");setProductReviews(null);setProductDetails(null);setShowDetails(false);setShowReviews(false);};
   const togSave=id=>setSaved(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const logBuy=p=>setBuys(pr=>[{pid:p.id,date:new Date().toISOString().split("T")[0],ret:p.retailer},...pr]);
+
+  const fetchReviews=useCallback((p)=>{
+    if(reviewsCache.current[p.id]){setProductReviews(reviewsCache.current[p.id]);return;}
+    setReviewsLoading(true);
+    const sys=`Return ONLY valid JSON array. No markdown.`;
+    const msg=`Generate 5 realistic customer reviews for "${p.name}" (${p.retailer}, $${p.price}, ${p.cat}).
+Return JSON: [{"name":"Reviewer","rating":4,"date":"2024-12-15","title":"Short title","body":"2-3 sentence review","verified":true}]
+Mix ratings (mostly 4-5, one 3). Realistic names. Keep bodies under 60 words.`;
+    callAI([{role:"user",content:msg}],sys,{webSearch:false,maxTokens:800}).then(raw=>{
+      let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
+      const si=c.indexOf("["),ei=c.lastIndexOf("]");
+      c=c.slice(si,ei+1).replace(/,\s*([}\]])/g,'$1');
+      const reviews=JSON.parse(c);
+      reviewsCache.current[p.id]=reviews;
+      setProductReviews(reviews);
+    }).catch(()=>setProductReviews([])).finally(()=>setReviewsLoading(false));
+  },[]);
+
+  const fetchDetails=useCallback((p)=>{
+    if(detailsCache.current[p.id]){setProductDetails(detailsCache.current[p.id]);return;}
+    setDetailsLoading(true);
+    const sys=`Return ONLY valid JSON. No markdown.`;
+    const msg=`Generate Amazon-style product details for "${p.name}" (${p.retailer}, $${p.price}, ${p.cat}).
+Return JSON: {"description":"2-3 sentence product description","features":["feature 1","feature 2","feature 3","feature 4","feature 5"],"specs":{"Brand":"...","Color":"...","Material":"...","Weight":"...","Dimensions":"..."}}
+Use realistic specs for this product type. Keep description under 50 words.`;
+    callAI([{role:"user",content:msg}],sys,{webSearch:false,maxTokens:600}).then(raw=>{
+      let c=raw.replace(/```json\s*/gi,"").replace(/```\s*/gi,"").trim();
+      const si=c.indexOf("{"),ei=c.lastIndexOf("}");
+      c=c.slice(si,ei+1).replace(/,\s*([}\]])/g,'$1');
+      const details=JSON.parse(c);
+      detailsCache.current[p.id]=details;
+      setProductDetails(details);
+    }).catch(()=>setProductDetails(null)).finally(()=>setDetailsLoading(false));
+  },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
   const viewedP=viewed.map(id=>prods.find(p=>p.id===id)).filter(Boolean);
@@ -438,8 +485,8 @@ Replace example values with real products for: ${recentSearches}. User budget: $
     inp:{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #e5e5e5",fontSize:14,outline:"none",boxSizing:"border-box",background:"#fff"},
   };
 
-  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
-    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
+  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);const[imgErr,setImgErr]=useState(false);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
+    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.imageUrl&&!imgErr?<img src={p.imageUrl} alt={p.name} onError={()=>setImgErr(true)} style={{height:"100%",width:"100%",objectFit:"contain",padding:8}}/>:p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
     <div style={{padding:9}}><div style={{fontSize:12,fontWeight:500,lineHeight:1.3,height:28,overflow:"hidden"}}>{p.name}</div>{p.rating>0&&<Stars r={p.rating} c={sm?null:p.reviews}/>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}><span style={{fontSize:14,fontWeight:700}}>${p.price}</span><span style={{fontSize:10,color:"#999"}}>{p.retailer}</span></div>{!sm&&p.why&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3,lineHeight:1.3}}>{p.why}</div>}</div></div>);};
 
   // ========== LOGIN / ONBOARDING ==========
@@ -600,19 +647,70 @@ Replace example values with real products for: ${recentSearches}. User budget: $
       </>)}
 
       {/* PRODUCT */}
-      {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);return(<>
+      {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);const hasAsin=!!p.asin;return(<div style={{paddingBottom:80,overflowY:"auto",height:"100vh"}}>
         <div style={{...s.hd,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div onClick={()=>{const back=prevStack.current.pop()||"home";setPg(back);}} style={{cursor:"pointer",padding:4}}><I.Back/></div><div style={{fontSize:16,fontWeight:600}}>Product Details</div><div onClick={()=>togSave(p.id)} style={{cursor:"pointer",color:sv?"#ef4444":"#999"}}><I.Heart s={22} f={sv}/></div></div>
-        <div style={{background:"#f8f8f8",height:220,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.img}</div>
+        <div style={{background:"#f8f8f8",height:240,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.imageUrl?<img src={p.imageUrl} alt={p.name} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="block";}} style={{height:"100%",width:"100%",objectFit:"contain",padding:16}}/>:null}<span style={{display:p.imageUrl?"none":"block"}}>{p.img}</span></div>
         <div style={{padding:20}}>
-          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span></div>
+          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span>{hasAsin&&<span style={{fontSize:11,color:"#ff9900",background:"#fff8ee",padding:"3px 10px",borderRadius:6,fontWeight:600}}>Amazon ASIN: {p.asin}</span>}</div>
           <h1 style={{fontSize:20,fontWeight:700,margin:"0 0 8px",lineHeight:1.3}}>{p.name}</h1>
           {p.rating>0&&<Stars r={p.rating} c={p.reviews}/>}
           <div style={{display:"flex",alignItems:"baseline",gap:10,marginTop:10}}><span style={{fontSize:26,fontWeight:700}}>${p.price}</span>{p.deal&&<span style={{fontSize:14,color:"#ef4444",fontWeight:600}}>Save {p.dealPct}%</span>}</div>
           {p.why&&<div style={{marginTop:14,background:"linear-gradient(135deg,#fafafa,#f5f0ff)",borderRadius:12,padding:12,border:"1px solid #ece5ff"}}><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span style={{color:"#7c3aed"}}><I.Sparkle s={14}/></span><span style={{fontSize:13,fontWeight:600}}>Why Recommended</span></div><div style={{fontSize:12,color:"#555",lineHeight:1.5}}>{p.why}</div></div>}
-          <div style={{display:"flex",gap:10,marginTop:18}}>{p.url&&p.url!=="#"?<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn(),flex:2,textDecoration:"none"}}>Buy from {p.retailer} <I.ExtLink/></a>:<button style={{...s.btn(),flex:2}}>Buy from {p.retailer} <I.ExtLink/></button>}{!bt?<button style={{...s.btn("s"),flex:1}} onClick={()=>logBuy(p)}>Log Purchase</button>:<div style={{display:"flex",alignItems:"center",gap:6,color:"#16a34a",fontSize:13,fontWeight:600,flex:1,justifyContent:"center"}}><I.Check/> Purchased</div>}</div>
+
+          {/* Action Buttons */}
+          <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
+            {hasAsin&&<a href={`https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${p.asin}&Quantity.1=1`} target="_blank" rel="noopener noreferrer" style={{...s.btn(),textDecoration:"none",background:"#ff9900",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><I.CartPlus s={16}/> Add to Amazon Cart</a>}
+            <div style={{display:"flex",gap:10}}>
+              {p.url&&p.url!=="#"?<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn(hasAsin?"s":undefined),flex:2,textDecoration:"none"}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></a>:<button style={{...s.btn(hasAsin?"s":undefined),flex:2}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></button>}
+              {!bt?<button style={{...s.btn("s"),flex:1}} onClick={()=>logBuy(p)}>Log Purchase</button>:<div style={{display:"flex",alignItems:"center",gap:6,color:"#16a34a",fontSize:13,fontWeight:600,flex:1,justifyContent:"center"}}><I.Check/> Purchased</div>}
+            </div>
+          </div>
+
+          {/* Product Details (expandable) */}
+          <div style={{marginTop:20,border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden"}}>
+            <div onClick={()=>{if(!showDetails){setShowDetails(true);if(!productDetails&&!detailsLoading)fetchDetails(p);}else setShowDetails(false);}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",cursor:"pointer",background:"#fafafa"}}>
+              <span style={{fontSize:14,fontWeight:600}}>Product Details</span>
+              <span style={{transform:showDetails?"rotate(180deg)":"none",transition:"transform 0.2s"}}><I.ChevD/></span>
+            </div>
+            {showDetails&&<div style={{padding:"0 16px 16px"}}>
+              {detailsLoading&&<div style={{textAlign:"center",padding:16,color:"#999",fontSize:13}}>Loading details...</div>}
+              {productDetails&&<>
+                {productDetails.description&&<p style={{fontSize:13,color:"#555",lineHeight:1.6,margin:"12px 0"}}>{productDetails.description}</p>}
+                {productDetails.features?.length>0&&<div style={{margin:"12px 0"}}><div style={{fontSize:13,fontWeight:600,marginBottom:8}}>Key Features</div><ul style={{margin:0,paddingLeft:20}}>{productDetails.features.map((f,i)=><li key={i} style={{fontSize:12,color:"#555",lineHeight:1.8}}>{f}</li>)}</ul></div>}
+                {productDetails.specs&&<div style={{margin:"12px 0"}}><div style={{fontSize:13,fontWeight:600,marginBottom:8}}>Specifications</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1px",background:"#f0f0f0",borderRadius:8,overflow:"hidden"}}>{Object.entries(productDetails.specs).map(([k,v])=><React.Fragment key={k}><div style={{padding:"8px 12px",fontSize:12,color:"#888",background:"#fafafa"}}>{k}</div><div style={{padding:"8px 12px",fontSize:12,color:"#333",background:"#fff"}}>{v}</div></React.Fragment>)}</div></div>}
+              </>}
+              {!detailsLoading&&!productDetails&&<div style={{padding:12,fontSize:13,color:"#999",textAlign:"center"}}>Could not load details</div>}
+            </div>}
+          </div>
+
+          {/* Reviews (expandable) */}
+          <div style={{marginTop:12,border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden"}}>
+            <div onClick={()=>{if(!showReviews){setShowReviews(true);if(!productReviews&&!reviewsLoading)fetchReviews(p);}else setShowReviews(false);}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",cursor:"pointer",background:"#fafafa"}}>
+              <span style={{fontSize:14,fontWeight:600}}>Customer Reviews</span>
+              <span style={{transform:showReviews?"rotate(180deg)":"none",transition:"transform 0.2s"}}><I.ChevD/></span>
+            </div>
+            {showReviews&&<div style={{padding:"0 16px 16px"}}>
+              {reviewsLoading&&<div style={{textAlign:"center",padding:16,color:"#999",fontSize:13}}>Loading reviews...</div>}
+              {productReviews?.length>0&&productReviews.map((rv,i)=><div key={i} style={{padding:"12px 0",borderBottom:i<productReviews.length-1?"1px solid #f5f5f5":"none"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                  <div style={{display:"flex"}}>{[1,2,3,4,5].map(n=><I.Star key={n} s={12} f={n<=rv.rating}/>)}</div>
+                  <span style={{fontSize:12,fontWeight:600}}>{rv.title}</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                  <span style={{fontSize:11,color:"#555"}}>{rv.name}</span>
+                  {rv.verified&&<span style={{fontSize:10,color:"#ff9900",fontWeight:600}}>Verified Purchase</span>}
+                  <span style={{fontSize:10,color:"#bbb"}}>{rv.date}</span>
+                </div>
+                <p style={{fontSize:12,color:"#555",lineHeight:1.5,margin:0}}>{rv.body}</p>
+              </div>)}
+              {productReviews?.length===0&&<div style={{padding:12,fontSize:13,color:"#999",textAlign:"center"}}>No reviews available</div>}
+              {!reviewsLoading&&!productReviews&&<div style={{padding:12,fontSize:13,color:"#999",textAlign:"center"}}>Could not load reviews</div>}
+            </div>}
+          </div>
+
           {sim.length>0&&<div style={{marginTop:24}}><div style={s.st}>Similar</div><div style={{display:"flex",gap:10,overflowX:"auto"}}>{sim.map(sp=><PC key={sp.id} p={sp} sm/>)}</div></div>}
         </div>
-      </>);})()}
+      </div>);})()}
 
       {/* ACTIVITY */}
       {pg==="activity"&&(()=>{const uniqSearches=[...new Set([...searches].reverse())];return(<>
