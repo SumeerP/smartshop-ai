@@ -207,18 +207,24 @@ window.App = function App(){
   const imgCache=useRef({});
   const[imgUrls,setImgUrls]=useState({});
 
-  // MCP checkout bridge
+  // MCP checkout bridge — statuses: adding_to_cart → added_to_cart → checking_out → completed | error
   const[mcpStatus,setMcpStatus]=useState({});
   useEffect(()=>{
-    // Expose MCP bridge on window for Chrome MCP to interact with
     window.__smartshopMCP={
       queue:[],
       status:{},
       getQueue:()=>window.__smartshopMCP.queue,
+      // MCP calls this to update status step-by-step
       notify:(productId,status,details)=>{
         window.__smartshopMCP.status[productId]={status,details,ts:Date.now()};
         window.dispatchEvent(new CustomEvent('mcp-update',{detail:{productId,status,details}}));
-      }
+      },
+      // Convenience methods for MCP to call
+      addingToCart:(pid)=>window.__smartshopMCP.notify(pid,'adding_to_cart',{message:'Navigating to Amazon...'}),
+      addedToCart:(pid)=>window.__smartshopMCP.notify(pid,'added_to_cart',{message:'Product added to cart!'}),
+      checkingOut:(pid)=>window.__smartshopMCP.notify(pid,'checking_out',{message:'Proceeding to checkout...'}),
+      complete:(pid,msg)=>window.__smartshopMCP.notify(pid,'completed',{message:msg||'Order placed successfully!'}),
+      fail:(pid,msg)=>window.__smartshopMCP.notify(pid,'error',{message:msg||'Something went wrong'})
     };
     const handler=(e)=>setMcpStatus(p=>({...p,[e.detail.productId]:{status:e.detail.status,details:e.detail.details}}));
     window.addEventListener('mcp-update',handler);
@@ -514,13 +520,13 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     return imgUrls[key]||null;
   };
 
-  // MCP Add to Cart — queues product for Chrome MCP to process
-  const mcpAddToCart=useCallback((p)=>{
+  // MCP Buy from Amazon — full checkout flow
+  const mcpBuy=useCallback((p)=>{
     if(!window.__smartshopMCP)return;
-    const item={id:p.id,name:p.name,asin:p.asin||'',price:p.price,url:p.url,ts:Date.now()};
+    const item={id:p.id,name:p.name,asin:p.asin||'',price:p.price,url:p.url,retailer:p.retailer,ts:Date.now()};
     window.__smartshopMCP.queue.push(item);
-    window.__smartshopMCP.status[p.id]={status:'queued',ts:Date.now()};
-    setMcpStatus(prev=>({...prev,[p.id]:{status:'queued'}}));
+    window.__smartshopMCP.status[p.id]={status:'adding_to_cart',ts:Date.now()};
+    setMcpStatus(prev=>({...prev,[p.id]:{status:'adding_to_cart'}}));
   },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
@@ -715,18 +721,42 @@ Use realistic specs for this product type. Keep description under 50 words.`;
 
           {/* Action Buttons */}
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
-            {hasAsin&&<a href={`https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${p.asin}&Quantity.1=1`} target="_blank" rel="noopener noreferrer" style={{...s.btn(),textDecoration:"none",background:"#ff9900",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><I.CartPlus s={16}/> Add to Amazon Cart</a>}
-            {hasAsin&&<button onClick={()=>mcpAddToCart(p)} disabled={mSt?.status==='queued'||mSt?.status==='processing'||mSt?.status==='completed'} style={{...s.btn(),background:mSt?.status==='completed'?"#16a34a":mSt?.status==='queued'||mSt?.status==='processing'?"#6366f1":"#232f3e",display:"flex",alignItems:"center",justifyContent:"center",gap:8,opacity:mSt?.status==='queued'||mSt?.status==='processing'?0.8:1}}>
-              {mSt?.status==='completed'?<><I.Check s={16}/> Added to Cart via AI</>:mSt?.status==='queued'||mSt?.status==='processing'?<><span style={{display:"inline-block",width:14,height:14,border:"2px solid #fff",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>AI Processing...</>:<><span style={{fontSize:14}}>🤖</span> Add to Cart via AI</>}
-            </button>}
-            {mSt&&<div style={{padding:"8px 12px",borderRadius:8,fontSize:12,background:mSt.status==='completed'?"#f0fdf4":mSt.status==='error'?"#fef2f2":"#eef2ff",color:mSt.status==='completed'?"#16a34a":mSt.status==='error'?"#dc2626":"#4f46e5"}}>
-              {mSt.status==='queued'&&"⏳ Queued — Tell Claude to process your cart"}
-              {mSt.status==='processing'&&"🤖 AI is adding to your Amazon cart..."}
-              {mSt.status==='completed'&&`✅ ${mSt.details?.message||"Added to Amazon cart!"}`}
-              {mSt.status==='error'&&`❌ ${mSt.details?.message||"Failed — try again"}`}
+            {hasAsin&&(()=>{const busy=mSt&&mSt.status!=='error';const done=mSt?.status==='completed';
+              const bgColor=done?"#16a34a":busy?"#ff9900":"#ff9900";
+              const label=done?"Order Placed!":mSt?.status==='checking_out'?"Checking Out...":mSt?.status==='added_to_cart'?"Added to Cart...":mSt?.status==='adding_to_cart'?"Adding to Cart...":"Buy from Amazon";
+              return <button onClick={()=>{if(!busy)mcpBuy(p);}} disabled={busy&&!done} style={{...s.btn(),background:bgColor,display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15,padding:"14px 20px",border:"none",position:"relative",overflow:"hidden"}}>
+                {busy&&!done&&<span style={{display:"inline-block",width:16,height:16,border:"2.5px solid rgba(255,255,255,0.4)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
+                {done&&<I.Check s={18}/>}
+                {!busy&&<I.CartPlus s={18}/>}
+                {label}
+              </button>;
+            })()}
+
+            {/* Live status tracker */}
+            {hasAsin&&mSt&&<div style={{border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden",background:"#fff"}}>
+              {[
+                {key:'adding_to_cart',icon:'🛒',text:'Adding to cart',active:mSt.status==='adding_to_cart'},
+                {key:'added_to_cart',icon:'✅',text:'Added to cart',active:mSt.status==='added_to_cart'},
+                {key:'checking_out',icon:'💳',text:'Checking out',active:mSt.status==='checking_out'},
+                {key:'completed',icon:'🎉',text:'Order complete',active:mSt.status==='completed'},
+              ].map((step,i)=>{
+                const steps=['adding_to_cart','added_to_cart','checking_out','completed'];
+                const ci=steps.indexOf(mSt.status);const si=steps.indexOf(step.key);
+                const past=si<ci;const current=si===ci;const future=si>ci;
+                const isError=mSt.status==='error';
+                return <div key={step.key} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:i<3?"1px solid #f5f5f5":"none",opacity:future?0.35:1,background:current?"#fffbeb":"transparent"}}>
+                  <span style={{fontSize:16,filter:future?"grayscale(1)":"none"}}>{isError&&current?"❌":past?"✅":step.icon}</span>
+                  <span style={{fontSize:13,fontWeight:current?600:400,color:past?"#16a34a":current?"#92400e":"#888",flex:1}}>{step.text}</span>
+                  {current&&!isError&&<span style={{display:"inline-block",width:12,height:12,border:"2px solid #f59e0b",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
+                  {past&&<span style={{color:"#16a34a",fontSize:11,fontWeight:600}}>Done</span>}
+                </div>;
+              })}
+              {mSt.status==='error'&&<div style={{padding:"10px 14px",background:"#fef2f2",color:"#dc2626",fontSize:12}}>❌ {mSt.details?.message||"Something went wrong"} — <span onClick={()=>setMcpStatus(prev=>{const n={...prev};delete n[p.id];return n;})} style={{textDecoration:"underline",cursor:"pointer"}}>Try again</span></div>}
+              {mSt.status==='completed'&&mSt.details?.message&&<div style={{padding:"10px 14px",background:"#f0fdf4",color:"#16a34a",fontSize:12,fontWeight:500}}>{mSt.details.message}</div>}
             </div>}
+
             <div style={{display:"flex",gap:10}}>
-              {p.url&&p.url!=="#"?<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn(hasAsin?"s":undefined),flex:2,textDecoration:"none"}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></a>:<button style={{...s.btn(hasAsin?"s":undefined),flex:2}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></button>}
+              {p.url&&p.url!=="#"&&<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn("s"),flex:2,textDecoration:"none"}}>View on {p.retailer} <I.ExtLink/></a>}
               {!bt?<button style={{...s.btn("s"),flex:1}} onClick={()=>logBuy(p)}>Log Purchase</button>:<div style={{display:"flex",alignItems:"center",gap:6,color:"#16a34a",fontSize:13,fontWeight:600,flex:1,justifyContent:"center"}}><I.Check/> Purchased</div>}
             </div>
           </div>
