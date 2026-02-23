@@ -11,6 +11,7 @@
     body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'Segoe UI', sans-serif; background: #fafafa; overflow-x: hidden; }
     #root { min-height: 100vh; }
     ::-webkit-scrollbar { width: 0; height: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -201,6 +202,28 @@ window.App = function App(){
   const[showReviews,setShowReviews]=useState(false);
   const reviewsCache=useRef({});
   const detailsCache=useRef({});
+
+  // Product image cache: asin/query → imageUrl
+  const imgCache=useRef({});
+  const[imgUrls,setImgUrls]=useState({});
+
+  // MCP checkout bridge
+  const[mcpStatus,setMcpStatus]=useState({});
+  useEffect(()=>{
+    // Expose MCP bridge on window for Chrome MCP to interact with
+    window.__smartshopMCP={
+      queue:[],
+      status:{},
+      getQueue:()=>window.__smartshopMCP.queue,
+      notify:(productId,status,details)=>{
+        window.__smartshopMCP.status[productId]={status,details,ts:Date.now()};
+        window.dispatchEvent(new CustomEvent('mcp-update',{detail:{productId,status,details}}));
+      }
+    };
+    const handler=(e)=>setMcpStatus(p=>({...p,[e.detail.productId]:{status:e.detail.status,details:e.detail.details}}));
+    window.addEventListener('mcp-update',handler);
+    return()=>window.removeEventListener('mcp-update',handler);
+  },[]);
 
   const scrollRef=useRef(null);
   const histRef=useRef(null);
@@ -467,6 +490,39 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     }).catch(()=>setProductDetails(null)).finally(()=>setDetailsLoading(false));
   },[]);
 
+  // Fetch product image from proxy (Amazon ASIN or Google search)
+  const fetchProductImage=useCallback((p)=>{
+    const key=p.asin||p.name;
+    if(imgCache.current[key])return;
+    imgCache.current[key]='loading';
+    const proxy=getProxyUrl();
+    const url=p.asin?`${proxy}/product-image?asin=${p.asin}`:`${proxy}/search-image?q=${encodeURIComponent(p.name+' product')}`;
+    fetch(url).then(r=>r.json()).then(d=>{
+      if(d.imageUrl){
+        imgCache.current[key]=d.imageUrl;
+        setImgUrls(prev=>({...prev,[key]:d.imageUrl}));
+      }else{imgCache.current[key]='none';}
+    }).catch(()=>{imgCache.current[key]='none';});
+  },[]);
+
+  // Trigger image fetch for any product with ASIN
+  const getImg=(p)=>{
+    const key=p.asin||p.name;
+    if(!imgUrls[key]&&imgCache.current[key]!=='loading'&&imgCache.current[key]!=='none'){
+      fetchProductImage(p);
+    }
+    return imgUrls[key]||null;
+  };
+
+  // MCP Add to Cart — queues product for Chrome MCP to process
+  const mcpAddToCart=useCallback((p)=>{
+    if(!window.__smartshopMCP)return;
+    const item={id:p.id,name:p.name,asin:p.asin||'',price:p.price,url:p.url,ts:Date.now()};
+    window.__smartshopMCP.queue.push(item);
+    window.__smartshopMCP.status[p.id]={status:'queued',ts:Date.now()};
+    setMcpStatus(prev=>({...prev,[p.id]:{status:'queued'}}));
+  },[]);
+
   const savedP=prods.filter(p=>saved.includes(p.id));
   const viewedP=viewed.map(id=>prods.find(p=>p.id===id)).filter(Boolean);
   const buyList=buys.map(b=>({...b,p:prods.find(p=>p.id===b.pid)})).filter(x=>x.p);
@@ -485,8 +541,8 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     inp:{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #e5e5e5",fontSize:14,outline:"none",boxSizing:"border-box",background:"#fff"},
   };
 
-  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
-    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
+  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);const iUrl=getImg(p);const[iErr,setIErr]=useState(false);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
+    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{iUrl&&!iErr?<img src={iUrl} alt={p.name} onError={()=>setIErr(true)} style={{height:"100%",width:"100%",objectFit:"contain",padding:8}} loading="lazy"/>:p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
     <div style={{padding:9}}><div style={{fontSize:12,fontWeight:500,lineHeight:1.3,height:28,overflow:"hidden"}}>{p.name}</div>{p.rating>0&&<Stars r={p.rating} c={sm?null:p.reviews}/>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}><span style={{fontSize:14,fontWeight:700}}>${p.price}</span><span style={{fontSize:10,color:"#999"}}>{p.retailer}</span></div>{!sm&&p.why&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3,lineHeight:1.3}}>{p.why}</div>}</div></div>);};
 
   // ========== LOGIN / ONBOARDING ==========
@@ -647,11 +703,11 @@ Use realistic specs for this product type. Keep description under 50 words.`;
       </>)}
 
       {/* PRODUCT */}
-      {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);const hasAsin=!!p.asin;return(<div style={{paddingBottom:80,overflowY:"auto",height:"100vh"}}>
+      {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);const hasAsin=!!p.asin;const dImg=getImg(p);const mSt=mcpStatus[p.id];return(<div style={{paddingBottom:80,overflowY:"auto",height:"100vh"}}>
         <div style={{...s.hd,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div onClick={()=>{const back=prevStack.current.pop()||"home";setPg(back);}} style={{cursor:"pointer",padding:4}}><I.Back/></div><div style={{fontSize:16,fontWeight:600}}>Product Details</div><div onClick={()=>togSave(p.id)} style={{cursor:"pointer",color:sv?"#ef4444":"#999"}}><I.Heart s={22} f={sv}/></div></div>
-        <div style={{background:"#f8f8f8",height:240,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.img}</div>
+        <div style={{background:"#f8f8f8",height:240,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{dImg?<img src={dImg} alt={p.name} onError={e=>{e.target.style.display="none";e.target.nextSibling&&(e.target.nextSibling.style.display="block");}} style={{height:"100%",width:"100%",objectFit:"contain",padding:16}} loading="lazy"/>:null}<span style={{display:dImg?"none":"block"}}>{p.img}</span></div>
         <div style={{padding:20}}>
-          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span>{hasAsin&&<span style={{fontSize:11,color:"#ff9900",background:"#fff8ee",padding:"3px 10px",borderRadius:6,fontWeight:600}}>Amazon ASIN: {p.asin}</span>}</div>
+          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span>{hasAsin&&<span style={{fontSize:11,color:"#ff9900",background:"#fff8ee",padding:"3px 10px",borderRadius:6,fontWeight:600}}>ASIN: {p.asin}</span>}</div>
           <h1 style={{fontSize:20,fontWeight:700,margin:"0 0 8px",lineHeight:1.3}}>{p.name}</h1>
           {p.rating>0&&<Stars r={p.rating} c={p.reviews}/>}
           <div style={{display:"flex",alignItems:"baseline",gap:10,marginTop:10}}><span style={{fontSize:26,fontWeight:700}}>${p.price}</span>{p.deal&&<span style={{fontSize:14,color:"#ef4444",fontWeight:600}}>Save {p.dealPct}%</span>}</div>
@@ -660,6 +716,15 @@ Use realistic specs for this product type. Keep description under 50 words.`;
           {/* Action Buttons */}
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
             {hasAsin&&<a href={`https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${p.asin}&Quantity.1=1`} target="_blank" rel="noopener noreferrer" style={{...s.btn(),textDecoration:"none",background:"#ff9900",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><I.CartPlus s={16}/> Add to Amazon Cart</a>}
+            {hasAsin&&<button onClick={()=>mcpAddToCart(p)} disabled={mSt?.status==='queued'||mSt?.status==='processing'||mSt?.status==='completed'} style={{...s.btn(),background:mSt?.status==='completed'?"#16a34a":mSt?.status==='queued'||mSt?.status==='processing'?"#6366f1":"#232f3e",display:"flex",alignItems:"center",justifyContent:"center",gap:8,opacity:mSt?.status==='queued'||mSt?.status==='processing'?0.8:1}}>
+              {mSt?.status==='completed'?<><I.Check s={16}/> Added to Cart via AI</>:mSt?.status==='queued'||mSt?.status==='processing'?<><span style={{display:"inline-block",width:14,height:14,border:"2px solid #fff",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>AI Processing...</>:<><span style={{fontSize:14}}>🤖</span> Add to Cart via AI</>}
+            </button>}
+            {mSt&&<div style={{padding:"8px 12px",borderRadius:8,fontSize:12,background:mSt.status==='completed'?"#f0fdf4":mSt.status==='error'?"#fef2f2":"#eef2ff",color:mSt.status==='completed'?"#16a34a":mSt.status==='error'?"#dc2626":"#4f46e5"}}>
+              {mSt.status==='queued'&&"⏳ Queued — Tell Claude to process your cart"}
+              {mSt.status==='processing'&&"🤖 AI is adding to your Amazon cart..."}
+              {mSt.status==='completed'&&`✅ ${mSt.details?.message||"Added to Amazon cart!"}`}
+              {mSt.status==='error'&&`❌ ${mSt.details?.message||"Failed — try again"}`}
+            </div>}
             <div style={{display:"flex",gap:10}}>
               {p.url&&p.url!=="#"?<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn(hasAsin?"s":undefined),flex:2,textDecoration:"none"}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></a>:<button style={{...s.btn(hasAsin?"s":undefined),flex:2}}>{hasAsin?"View on":"Buy from"} {p.retailer} <I.ExtLink/></button>}
               {!bt?<button style={{...s.btn("s"),flex:1}} onClick={()=>logBuy(p)}>Log Purchase</button>:<div style={{display:"flex",alignItems:"center",gap:6,color:"#16a34a",fontSize:13,fontWeight:600,flex:1,justifyContent:"center"}}><I.Check/> Purchased</div>}
