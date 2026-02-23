@@ -98,8 +98,8 @@ Use this profile to personalize every recommendation. Reference their preference
   return `You are SmartShop AI, a personal shopping assistant.${pref}
 
 CRITICAL: Respond with ONLY a valid JSON object. Start with { end with }. No other text.
-{"message":"Conversational response with **bold**","products":[{"name":"Name","price":29.99,"rating":4.5,"reviews":1234,"retailer":"Amazon","category":"Electronics","emoji":"🎧","url":"https://amazon.com/dp/B0XXXXX","asin":"B0XXXXX","imageUrl":"https://m.media-amazon.com/images/I/XXXXX._AC_SX200_.jpg","deal":false,"dealPct":0,"whyRecommended":"Reason"}],"followUpQuestion":"Question","searchQueries":["q1","q2"]}
-Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences. IMPORTANT: For Amazon products, include a real ASIN and a real Amazon product image URL (m.media-amazon.com). For other retailers, omit asin and imageUrl.`;
+{"message":"Conversational response with **bold**","products":[{"name":"Name","price":29.99,"rating":4.5,"reviews":1234,"retailer":"Amazon","category":"Electronics","emoji":"🎧","url":"https://amazon.com/dp/B09XS7JWHH","asin":"B09XS7JWHH","deal":false,"dealPct":0,"whyRecommended":"Reason"}],"followUpQuestion":"Question","searchQueries":["q1","q2"]}
+Rules: 2-5 real products, real prices, real retailers. Use web search for current data. Appropriate emoji. Always include followUpQuestion and searchQueries. If user has a profile, tailor recommendations to their preferences. IMPORTANT: For Amazon products, always include the real ASIN (e.g. B09XS7JWHH) and set url to https://amazon.com/dp/{ASIN}. Only use real ASINs you are confident about.`;
 }
 
 function needsWebSearch(text){
@@ -125,7 +125,7 @@ function parseAI(raw){
     let depth=0,end=start;
     for(let i=start;i<c.length;i++){if(c[i]==="{")depth++;else if(c[i]==="}"){depth--;if(depth===0){end=i;break;}}}
     const j=JSON.parse(c.slice(start,end+1));
-    return{msg:j.message||"Here are recommendations:",products:(j.products||[]).map((p,i)=>({id:`ai-${Date.now()}-${i}`,name:p.name||"Product",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""})),followUp:j.followUpQuestion||null,suggestions:j.searchQueries||[]};
+    return{msg:j.message||"Here are recommendations:",products:(j.products||[]).map((p,i)=>({id:`ai-${Date.now()}-${i}`,name:p.name||"Product",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""})),followUp:j.followUpQuestion||null,suggestions:j.searchQueries||[]};
   }catch(e){
     let cl=raw.replace(/```[\s\S]*?```/gi,"").replace(/\{[\s\S]*\}/g,"").trim();
     if(!cl||cl.length<10)cl="Please try again.";
@@ -386,7 +386,7 @@ Item format: {"name":"...","price":N,"rating":4.5,"reviews":N,"retailer":"...","
 
     callAI([{role:"user",content:prompt}],sys,{webSearch:false,maxTokens:1500}).then(raw=>{
       const j=tryParse(raw);
-      const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+      const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
       const deals=mkP(j.dealsForYou);
       const popular=mkP(j.popularPurchases);
       const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
@@ -403,7 +403,7 @@ Item format: {"name":"...","price":N,"rating":4.5,"reviews":N,"retailer":"...","
 Replace example values with real products for: ${recentSearches}. User budget: ${user.budget}. Keep JSON valid, no trailing commas.`;
       return callAI([{role:"user",content:retry}],sys,{webSearch:false,maxTokens:1500}).then(raw2=>{
         const j=tryParse(raw2);
-        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",imageUrl:p.imageUrl||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
+        const mkP=(arr)=>(arr||[]).map((p,i)=>({id:`home-${Date.now()}-${i}-${Math.random().toString(36).slice(2,6)}`,name:p.name||"",price:p.price||0,rating:p.rating||4.0,reviews:p.reviews||0,retailer:p.retailer||"Online",cat:p.category||"General",img:p.emoji||"🛍️",url:p.url||"#",asin:p.asin||"",deal:!!p.deal,dealPct:p.dealPct||0,why:p.whyRecommended||""}));
         const deals=mkP(j.dealsForYou);
         const popular=mkP(j.popularPurchases);
         const bySearch=(j.becauseYouSearched||[]).map(b=>({query:b.query,products:mkP(b.products)}));
@@ -485,8 +485,8 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     inp:{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #e5e5e5",fontSize:14,outline:"none",boxSizing:"border-box",background:"#fff"},
   };
 
-  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);const[imgErr,setImgErr]=useState(false);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
-    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.imageUrl&&!imgErr?<img src={p.imageUrl} alt={p.name} onError={()=>setImgErr(true)} style={{height:"100%",width:"100%",objectFit:"contain",padding:8}}/>:p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
+  const PC=({p,sm})=>{const inCmp=compareIds.includes(p.id);return(<div onClick={()=>open(p)} style={{background:"#fff",borderRadius:14,border:inCmp?"2px solid #7c3aed":"1px solid #f0f0f0",overflow:"hidden",cursor:"pointer",minWidth:sm?160:undefined,maxWidth:sm?160:undefined,flexShrink:0}}>
+    <div style={{height:sm?100:130,background:"#f8f8f8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:sm?40:52,position:"relative"}}>{p.img}{p.deal&&<span style={{...s.badge("#ef4444"),position:"absolute",top:6,left:6,fontSize:10}}>-{p.dealPct}%</span>}<div onClick={e=>{e.stopPropagation();togCompare(p.id)}} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:6,background:inCmp?"#7c3aed":"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}>{inCmp?<I.Check s={14}/>:<I.Compare s={14}/>}</div><div onClick={e=>{e.stopPropagation();togSave(p.id)}} style={{position:"absolute",bottom:6,right:6,color:saved.includes(p.id)?"#ef4444":"#ccc"}}><I.Heart s={15} f={saved.includes(p.id)}/></div></div>
     <div style={{padding:9}}><div style={{fontSize:12,fontWeight:500,lineHeight:1.3,height:28,overflow:"hidden"}}>{p.name}</div>{p.rating>0&&<Stars r={p.rating} c={sm?null:p.reviews}/>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}><span style={{fontSize:14,fontWeight:700}}>${p.price}</span><span style={{fontSize:10,color:"#999"}}>{p.retailer}</span></div>{!sm&&p.why&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3,lineHeight:1.3}}>{p.why}</div>}</div></div>);};
 
   // ========== LOGIN / ONBOARDING ==========
@@ -649,7 +649,7 @@ Use realistic specs for this product type. Keep description under 50 words.`;
       {/* PRODUCT */}
       {pg==="product"&&sel&&(()=>{const p=sel,sv=saved.includes(p.id),bt=buys.some(x=>x.pid===p.id),sim=prods.filter(x=>x.cat===p.cat&&x.id!==p.id).slice(0,4);const hasAsin=!!p.asin;return(<div style={{paddingBottom:80,overflowY:"auto",height:"100vh"}}>
         <div style={{...s.hd,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div onClick={()=>{const back=prevStack.current.pop()||"home";setPg(back);}} style={{cursor:"pointer",padding:4}}><I.Back/></div><div style={{fontSize:16,fontWeight:600}}>Product Details</div><div onClick={()=>togSave(p.id)} style={{cursor:"pointer",color:sv?"#ef4444":"#999"}}><I.Heart s={22} f={sv}/></div></div>
-        <div style={{background:"#f8f8f8",height:240,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.imageUrl?<img src={p.imageUrl} alt={p.name} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="block";}} style={{height:"100%",width:"100%",objectFit:"contain",padding:16}}/>:null}<span style={{display:p.imageUrl?"none":"block"}}>{p.img}</span></div>
+        <div style={{background:"#f8f8f8",height:240,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90}}>{p.img}</div>
         <div style={{padding:20}}>
           <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.cat}</span><span style={{fontSize:12,color:"#888",background:"#f0f0f0",padding:"3px 10px",borderRadius:6}}>{p.retailer}</span>{hasAsin&&<span style={{fontSize:11,color:"#ff9900",background:"#fff8ee",padding:"3px 10px",borderRadius:6,fontWeight:600}}>Amazon ASIN: {p.asin}</span>}</div>
           <h1 style={{fontSize:20,fontWeight:700,margin:"0 0 8px",lineHeight:1.3}}>{p.name}</h1>
