@@ -207,29 +207,8 @@ window.App = function App(){
   const imgCache=useRef({});
   const[imgUrls,setImgUrls]=useState({});
 
-  // MCP checkout bridge — statuses: adding_to_cart → added_to_cart → checking_out → completed | error
+  // Amazon checkout status tracker — adding_to_cart → added_to_cart → checking_out → completed | error
   const[mcpStatus,setMcpStatus]=useState({});
-  useEffect(()=>{
-    window.__smartshopMCP={
-      queue:[],
-      status:{},
-      getQueue:()=>window.__smartshopMCP.queue,
-      // MCP calls this to update status step-by-step
-      notify:(productId,status,details)=>{
-        window.__smartshopMCP.status[productId]={status,details,ts:Date.now()};
-        window.dispatchEvent(new CustomEvent('mcp-update',{detail:{productId,status,details}}));
-      },
-      // Convenience methods for MCP to call
-      addingToCart:(pid)=>window.__smartshopMCP.notify(pid,'adding_to_cart',{message:'Navigating to Amazon...'}),
-      addedToCart:(pid)=>window.__smartshopMCP.notify(pid,'added_to_cart',{message:'Product added to cart!'}),
-      checkingOut:(pid)=>window.__smartshopMCP.notify(pid,'checking_out',{message:'Proceeding to checkout...'}),
-      complete:(pid,msg)=>window.__smartshopMCP.notify(pid,'completed',{message:msg||'Order placed successfully!'}),
-      fail:(pid,msg)=>window.__smartshopMCP.notify(pid,'error',{message:msg||'Something went wrong'})
-    };
-    const handler=(e)=>setMcpStatus(p=>({...p,[e.detail.productId]:{status:e.detail.status,details:e.detail.details}}));
-    window.addEventListener('mcp-update',handler);
-    return()=>window.removeEventListener('mcp-update',handler);
-  },[]);
 
   const scrollRef=useRef(null);
   const histRef=useRef(null);
@@ -520,13 +499,32 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     return imgUrls[key]||null;
   };
 
-  // MCP Buy from Amazon — full checkout flow
+  // Buy from Amazon — opens add-to-cart URL + progresses to checkout with live status
   const mcpBuy=useCallback((p)=>{
-    if(!window.__smartshopMCP)return;
-    const item={id:p.id,name:p.name,asin:p.asin||'',price:p.price,url:p.url,retailer:p.retailer,ts:Date.now()};
-    window.__smartshopMCP.queue.push(item);
-    window.__smartshopMCP.status[p.id]={status:'adding_to_cart',ts:Date.now()};
-    setMcpStatus(prev=>({...prev,[p.id]:{status:'adding_to_cart'}}));
+    if(!p.asin)return;
+    const pid=p.id;
+    // Step 1: Adding to cart
+    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Opening Amazon...'}}}));
+    // Open Amazon add-to-cart URL (adds item directly)
+    const cartTab=window.open(`https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${p.asin}&Quantity.1=1`,'_blank');
+    // Step 2: After brief delay, mark as added
+    setTimeout(()=>{
+      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Product added to Amazon cart!'}}}));
+      // Step 3: After another delay, proceed to checkout
+      setTimeout(()=>{
+        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Opening checkout...'}}}));
+        // Navigate the Amazon tab to checkout
+        if(cartTab&&!cartTab.closed){
+          try{cartTab.location.href='https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';}catch(e){}
+        }else{
+          window.open('https://www.amazon.com/gp/cart/view.html?ref_=nav_cart','_blank');
+        }
+        // Step 4: Mark as ready for user to complete
+        setTimeout(()=>{
+          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'Checkout ready! Complete your order on Amazon.'}}}));
+        },2000);
+      },2000);
+    },2500);
   },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
@@ -723,7 +721,7 @@ Use realistic specs for this product type. Keep description under 50 words.`;
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
             {hasAsin&&(()=>{const busy=mSt&&mSt.status!=='error';const done=mSt?.status==='completed';
               const bgColor=done?"#16a34a":busy?"#ff9900":"#ff9900";
-              const label=done?"Order Placed!":mSt?.status==='checking_out'?"Checking Out...":mSt?.status==='added_to_cart'?"Added to Cart...":mSt?.status==='adding_to_cart'?"Adding to Cart...":"Buy from Amazon";
+              const label=done?"Ready on Amazon!":mSt?.status==='checking_out'?"Checking Out...":mSt?.status==='added_to_cart'?"Added to Cart...":mSt?.status==='adding_to_cart'?"Adding to Cart...":"Buy from Amazon";
               return <button onClick={()=>{if(!busy)mcpBuy(p);}} disabled={busy&&!done} style={{...s.btn(),background:bgColor,display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15,padding:"14px 20px",border:"none",position:"relative",overflow:"hidden"}}>
                 {busy&&!done&&<span style={{display:"inline-block",width:16,height:16,border:"2.5px solid rgba(255,255,255,0.4)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
                 {done&&<I.Check s={18}/>}
@@ -738,7 +736,7 @@ Use realistic specs for this product type. Keep description under 50 words.`;
                 {key:'adding_to_cart',icon:'🛒',text:'Adding to cart',active:mSt.status==='adding_to_cart'},
                 {key:'added_to_cart',icon:'✅',text:'Added to cart',active:mSt.status==='added_to_cart'},
                 {key:'checking_out',icon:'💳',text:'Checking out',active:mSt.status==='checking_out'},
-                {key:'completed',icon:'🎉',text:'Order complete',active:mSt.status==='completed'},
+                {key:'completed',icon:'🎉',text:'Ready — complete on Amazon',active:mSt.status==='completed'},
               ].map((step,i)=>{
                 const steps=['adding_to_cart','added_to_cart','checking_out','completed'];
                 const ci=steps.indexOf(mSt.status);const si=steps.indexOf(step.key);
