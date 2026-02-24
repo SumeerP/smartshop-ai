@@ -499,32 +499,29 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     return imgUrls[key]||null;
   };
 
-  // Buy from Amazon — opens add-to-cart URL + progresses to checkout with live status
+  // Buy from Amazon — opens Amazon product page, shows live status, then opens cart
   const mcpBuy=useCallback((p)=>{
     if(!p.asin)return;
     const pid=p.id;
+    // Must open window synchronously inside click handler to avoid popup blocker
+    const a=document.createElement('a');
+    a.href=`https://www.amazon.com/dp/${p.asin}?tag=add-to-cart`;
+    a.target='_blank';a.rel='noopener';
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
     // Step 1: Adding to cart
-    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Opening Amazon...'}}}));
-    // Open Amazon add-to-cart URL (adds item directly)
-    const cartTab=window.open(`https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${p.asin}&Quantity.1=1`,'_blank');
-    // Step 2: After brief delay, mark as added
+    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Opening Amazon product page...'}}}));
+    // Step 2: After delay, mark as added (user adds from Amazon page)
     setTimeout(()=>{
-      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Product added to Amazon cart!'}}}));
-      // Step 3: After another delay, proceed to checkout
+      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Add to cart on Amazon, then come back here!'}}}));
+      // Step 3: Prompt checkout
       setTimeout(()=>{
-        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Opening checkout...'}}}));
-        // Navigate the Amazon tab to checkout
-        if(cartTab&&!cartTab.closed){
-          try{cartTab.location.href='https://www.amazon.com/gp/cart/view.html?ref_=nav_cart';}catch(e){}
-        }else{
-          window.open('https://www.amazon.com/gp/cart/view.html?ref_=nav_cart','_blank');
-        }
-        // Step 4: Mark as ready for user to complete
+        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Ready to checkout on Amazon!'}}}));
+        // Step 4: Mark as ready
         setTimeout(()=>{
-          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'Checkout ready! Complete your order on Amazon.'}}}));
-        },2000);
-      },2000);
-    },2500);
+          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'Complete your order on Amazon tab!'}}}));
+        },3000);
+      },3000);
+    },3000);
   },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
@@ -733,10 +730,10 @@ Use realistic specs for this product type. Keep description under 50 words.`;
             {/* Live status tracker */}
             {hasAsin&&mSt&&<div style={{border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden",background:"#fff"}}>
               {[
-                {key:'adding_to_cart',icon:'🛒',text:'Adding to cart',active:mSt.status==='adding_to_cart'},
-                {key:'added_to_cart',icon:'✅',text:'Added to cart',active:mSt.status==='added_to_cart'},
-                {key:'checking_out',icon:'💳',text:'Checking out',active:mSt.status==='checking_out'},
-                {key:'completed',icon:'🎉',text:'Ready — complete on Amazon',active:mSt.status==='completed'},
+                {key:'adding_to_cart',icon:'🛒',text:'Opening Amazon page',active:mSt.status==='adding_to_cart'},
+                {key:'added_to_cart',icon:'✅',text:'Add to cart on Amazon',active:mSt.status==='added_to_cart'},
+                {key:'checking_out',icon:'💳',text:'Proceed to checkout',active:mSt.status==='checking_out'},
+                {key:'completed',icon:'🎉',text:'Complete your order!',active:mSt.status==='completed'},
               ].map((step,i)=>{
                 const steps=['adding_to_cart','added_to_cart','checking_out','completed'];
                 const ci=steps.indexOf(mSt.status);const si=steps.indexOf(step.key);
