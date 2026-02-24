@@ -499,29 +499,28 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     return imgUrls[key]||null;
   };
 
-  // Buy from Amazon — opens Amazon product page, shows live status, then opens cart
+  // Buy from Amazon — opens product page, guides user through add-to-cart → checkout
   const mcpBuy=useCallback((p)=>{
     if(!p.asin)return;
     const pid=p.id;
-    // Must open window synchronously inside click handler to avoid popup blocker
+    // Step 1: Open Amazon product detail page (synchronous <a> click avoids popup blocker)
     const a=document.createElement('a');
-    a.href=`https://www.amazon.com/dp/${p.asin}?tag=add-to-cart`;
+    a.href=`https://www.amazon.com/dp/${p.asin}`;
     a.target='_blank';a.rel='noopener';
     document.body.appendChild(a);a.click();document.body.removeChild(a);
-    // Step 1: Adding to cart
-    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Opening Amazon product page...'}}}));
-    // Step 2: After delay, mark as added (user adds from Amazon page)
+    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Amazon product page opened — click "Add to Cart" there'}}}));
+    // Step 2: After user has time to view product and add to cart
     setTimeout(()=>{
-      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Add to cart on Amazon, then come back here!'}}}));
-      // Step 3: Prompt checkout
+      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Added? Now click "Proceed to checkout" on Amazon'}}}));
+      // Step 3: Guide to checkout
       setTimeout(()=>{
-        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Ready to checkout on Amazon!'}}}));
-        // Step 4: Mark as ready
+        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Complete your purchase on the Amazon checkout page'}}}));
+        // Step 4: Done
         setTimeout(()=>{
-          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'Complete your order on Amazon tab!'}}}));
-        },3000);
-      },3000);
-    },3000);
+          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'All done! Check your Amazon tab to confirm.'}}}));
+        },5000);
+      },5000);
+    },5000);
   },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
@@ -718,7 +717,7 @@ Use realistic specs for this product type. Keep description under 50 words.`;
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
             {hasAsin&&(()=>{const busy=mSt&&mSt.status!=='error';const done=mSt?.status==='completed';
               const bgColor=done?"#16a34a":busy?"#ff9900":"#ff9900";
-              const label=done?"Ready on Amazon!":mSt?.status==='checking_out'?"Checking Out...":mSt?.status==='added_to_cart'?"Added to Cart...":mSt?.status==='adding_to_cart'?"Adding to Cart...":"Buy from Amazon";
+              const label=done?"Done!":mSt?.status==='checking_out'?"Checkout on Amazon":mSt?.status==='added_to_cart'?"Add to Cart on Amazon":mSt?.status==='adding_to_cart'?"Go to Amazon Tab":"Buy from Amazon";
               return <button onClick={()=>{if(!busy)mcpBuy(p);}} disabled={busy&&!done} style={{...s.btn(),background:bgColor,display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15,padding:"14px 20px",border:"none",position:"relative",overflow:"hidden"}}>
                 {busy&&!done&&<span style={{display:"inline-block",width:16,height:16,border:"2.5px solid rgba(255,255,255,0.4)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
                 {done&&<I.Check s={18}/>}
@@ -730,10 +729,10 @@ Use realistic specs for this product type. Keep description under 50 words.`;
             {/* Live status tracker */}
             {hasAsin&&mSt&&<div style={{border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden",background:"#fff"}}>
               {[
-                {key:'adding_to_cart',icon:'🛒',text:'Opening Amazon page',active:mSt.status==='adding_to_cart'},
-                {key:'added_to_cart',icon:'✅',text:'Add to cart on Amazon',active:mSt.status==='added_to_cart'},
-                {key:'checking_out',icon:'💳',text:'Proceed to checkout',active:mSt.status==='checking_out'},
-                {key:'completed',icon:'🎉',text:'Complete your order!',active:mSt.status==='completed'},
+                {key:'adding_to_cart',icon:'📦',text:'View product on Amazon',active:mSt.status==='adding_to_cart'},
+                {key:'added_to_cart',icon:'🛒',text:'Click "Add to Cart" on Amazon',active:mSt.status==='added_to_cart'},
+                {key:'checking_out',icon:'💳',text:'Click "Proceed to checkout"',active:mSt.status==='checking_out'},
+                {key:'completed',icon:'🎉',text:'Place your order on Amazon',active:mSt.status==='completed'},
               ].map((step,i)=>{
                 const steps=['adding_to_cart','added_to_cart','checking_out','completed'];
                 const ci=steps.indexOf(mSt.status);const si=steps.indexOf(step.key);
