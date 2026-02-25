@@ -499,28 +499,23 @@ Use realistic specs for this product type. Keep description under 50 words.`;
     return imgUrls[key]||null;
   };
 
-  // Buy from Amazon — opens product page, guides user through add-to-cart → checkout
+  // Buy from Amazon — opens product page, user advances steps manually
   const mcpBuy=useCallback((p)=>{
     if(!p.asin)return;
     const pid=p.id;
-    // Step 1: Open Amazon product detail page (synchronous <a> click avoids popup blocker)
+    // Open Amazon product detail page (synchronous <a> click avoids popup blocker)
     const a=document.createElement('a');
     a.href=`https://www.amazon.com/dp/${p.asin}`;
     a.target='_blank';a.rel='noopener';
     document.body.appendChild(a);a.click();document.body.removeChild(a);
-    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart',details:{message:'Amazon product page opened — click "Add to Cart" there'}}}));
-    // Step 2: After user has time to view product and add to cart
-    setTimeout(()=>{
-      setMcpStatus(prev=>({...prev,[pid]:{status:'added_to_cart',details:{message:'Added? Now click "Proceed to checkout" on Amazon'}}}));
-      // Step 3: Guide to checkout
-      setTimeout(()=>{
-        setMcpStatus(prev=>({...prev,[pid]:{status:'checking_out',details:{message:'Complete your purchase on the Amazon checkout page'}}}));
-        // Step 4: Done
-        setTimeout(()=>{
-          setMcpStatus(prev=>({...prev,[pid]:{status:'completed',details:{message:'All done! Check your Amazon tab to confirm.'}}}));
-        },5000);
-      },5000);
-    },5000);
+    setMcpStatus(prev=>({...prev,[pid]:{status:'adding_to_cart'}}));
+  },[]);
+  const mcpAdvance=useCallback((pid)=>{
+    setMcpStatus(prev=>{
+      const cur=prev[pid]?.status;
+      const next=cur==='adding_to_cart'?'added_to_cart':cur==='added_to_cart'?'checking_out':cur==='checking_out'?'completed':cur;
+      return{...prev,[pid]:{status:next}};
+    });
   },[]);
 
   const savedP=prods.filter(p=>saved.includes(p.id));
@@ -715,39 +710,31 @@ Use realistic specs for this product type. Keep description under 50 words.`;
 
           {/* Action Buttons */}
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:18}}>
-            {hasAsin&&(()=>{const busy=mSt&&mSt.status!=='error';const done=mSt?.status==='completed';
-              const bgColor=done?"#16a34a":busy?"#ff9900":"#ff9900";
-              const label=done?"Done!":mSt?.status==='checking_out'?"Checkout on Amazon":mSt?.status==='added_to_cart'?"Add to Cart on Amazon":mSt?.status==='adding_to_cart'?"Go to Amazon Tab":"Buy from Amazon";
-              return <button onClick={()=>{if(!busy)mcpBuy(p);}} disabled={busy&&!done} style={{...s.btn(),background:bgColor,display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15,padding:"14px 20px",border:"none",position:"relative",overflow:"hidden"}}>
-                {busy&&!done&&<span style={{display:"inline-block",width:16,height:16,border:"2.5px solid rgba(255,255,255,0.4)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
-                {done&&<I.Check s={18}/>}
-                {!busy&&<I.CartPlus s={18}/>}
-                {label}
-              </button>;
-            })()}
+            {hasAsin&&!mSt&&<button onClick={()=>mcpBuy(p)} style={{...s.btn(),background:"#ff9900",display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15,padding:"14px 20px",border:"none"}}><I.CartPlus s={18}/>Buy from Amazon</button>}
 
-            {/* Live status tracker */}
-            {hasAsin&&mSt&&<div style={{border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden",background:"#fff"}}>
-              {[
-                {key:'adding_to_cart',icon:'📦',text:'View product on Amazon',active:mSt.status==='adding_to_cart'},
-                {key:'added_to_cart',icon:'🛒',text:'Click "Add to Cart" on Amazon',active:mSt.status==='added_to_cart'},
-                {key:'checking_out',icon:'💳',text:'Click "Proceed to checkout"',active:mSt.status==='checking_out'},
-                {key:'completed',icon:'🎉',text:'Place your order on Amazon',active:mSt.status==='completed'},
-              ].map((step,i)=>{
-                const steps=['adding_to_cart','added_to_cart','checking_out','completed'];
-                const ci=steps.indexOf(mSt.status);const si=steps.indexOf(step.key);
-                const past=si<ci;const current=si===ci;const future=si>ci;
-                const isError=mSt.status==='error';
-                return <div key={step.key} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:i<3?"1px solid #f5f5f5":"none",opacity:future?0.35:1,background:current?"#fffbeb":"transparent"}}>
-                  <span style={{fontSize:16,filter:future?"grayscale(1)":"none"}}>{isError&&current?"❌":past?"✅":step.icon}</span>
-                  <span style={{fontSize:13,fontWeight:current?600:400,color:past?"#16a34a":current?"#92400e":"#888",flex:1}}>{step.text}</span>
-                  {current&&!isError&&<span style={{display:"inline-block",width:12,height:12,border:"2px solid #f59e0b",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>}
+            {/* Interactive checkout checklist */}
+            {hasAsin&&mSt&&(()=>{const done=mSt.status==='completed';const steps=[
+                {key:'adding_to_cart',icon:'📦',text:'Open product on Amazon',hint:'Tap "Done" after viewing the product page'},
+                {key:'added_to_cart',icon:'🛒',text:'Add to Cart on Amazon',hint:'Click "Add to Cart" on Amazon, then tap "Done"'},
+                {key:'checking_out',icon:'💳',text:'Proceed to checkout',hint:'Click "Proceed to checkout" on Amazon, then tap "Done"'},
+                {key:'completed',icon:'🎉',text:'Order placed!',hint:''},
+              ];const stepKeys=steps.map(x=>x.key);const ci=stepKeys.indexOf(mSt.status);
+              return <div style={{border:"1px solid #f0f0f0",borderRadius:12,overflow:"hidden",background:"#fff"}}>
+              {steps.map((step,i)=>{const si=stepKeys.indexOf(step.key);const past=si<ci;const current=si===ci;const future=si>ci;
+                return <div key={step.key} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderBottom:i<3?"1px solid #f5f5f5":"none",opacity:future?0.3:1,background:current?"#fffbeb":done&&current?"#f0fdf4":"transparent"}}>
+                  <span style={{fontSize:18,filter:future?"grayscale(1)":"none"}}>{past?"✅":step.icon}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,fontWeight:current?600:400,color:past?"#16a34a":current?"#92400e":"#888"}}>{step.text}</div>
+                    {current&&!done&&step.hint&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>{step.hint}</div>}
+                  </div>
+                  {current&&!done&&<div onClick={()=>mcpAdvance(p.id)} style={{padding:"5px 14px",borderRadius:8,background:"#16a34a",color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>Done</div>}
                   {past&&<span style={{color:"#16a34a",fontSize:11,fontWeight:600}}>Done</span>}
+                  {done&&current&&<span style={{color:"#16a34a",fontSize:11,fontWeight:600}}><I.Check s={14}/></span>}
                 </div>;
               })}
+              {done&&<div style={{padding:"10px 14px",background:"#f0fdf4",color:"#16a34a",fontSize:12,fontWeight:500,textAlign:"center"}}>Purchase complete! Thank you for shopping with SmartShop.</div>}
               {mSt.status==='error'&&<div style={{padding:"10px 14px",background:"#fef2f2",color:"#dc2626",fontSize:12}}>❌ {mSt.details?.message||"Something went wrong"} — <span onClick={()=>setMcpStatus(prev=>{const n={...prev};delete n[p.id];return n;})} style={{textDecoration:"underline",cursor:"pointer"}}>Try again</span></div>}
-              {mSt.status==='completed'&&mSt.details?.message&&<div style={{padding:"10px 14px",background:"#f0fdf4",color:"#16a34a",fontSize:12,fontWeight:500}}>{mSt.details.message}</div>}
-            </div>}
+            </div>;})()}
 
             <div style={{display:"flex",gap:10}}>
               {p.url&&p.url!=="#"&&<a href={p.url} target="_blank" rel="noopener noreferrer" style={{...s.btn("s"),flex:2,textDecoration:"none"}}>View on {p.retailer} <I.ExtLink/></a>}
