@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
+import { register as apiRegister, login as apiLogin, logout as apiLogout, pullSync, schedulePush, isLoggedIn, getAccounts, getLastSyncTime } from './sync';
+import type { SyncPayload, ServerData } from './sync';
 
 // --- Icons ---
 const I={
@@ -135,6 +137,11 @@ export default function App(){
   const[user,setUser]=useState(()=>loadState(STORE_KEYS.user, null));
   const[onboardStep,setOnboardStep]=useState(0);
   const[formData,setFormData]=useState({name:"",email:"",gender:"",age:"",skin:"",hair:"",interests:[],budget:"moderate"});
+  const[password,setPassword]=useState("");
+  const[confirmPw,setConfirmPw]=useState("");
+  const[loginMode,setLoginMode]=useState(false);
+  const[authErr,setAuthErr]=useState("");
+  const[authLoading,setAuthLoading]=useState(false);
 
   // App state
   const[pg,setPg]=useState("home");
@@ -207,18 +214,30 @@ export default function App(){
   }
   const threadVolatileRef=useRef({});
 
-  // --- Persist state to localStorage ---
+  // --- Collect sync payload for background push ---
+  const collectSyncPayload=useCallback(():SyncPayload=>{
+    return{
+      saved:saved.map(id=>{const p=prods.find(x=>x.id===id);return p?{product_id:id,product_json:JSON.stringify(p)}:null;}).filter(Boolean) as any,
+      buys:buys.map(b=>{const p=prods.find(x=>x.id===b.pid);return{product_id:b.pid,product_json:JSON.stringify(p||{}),retailer:b.ret||'',purchased_at:b.date};}),
+      searches,
+      threads:threads.map(t=>({thread_cid:t.id,name:t.name,created_at:new Date(t.createdAt).toISOString(),updated_at:new Date(t.updatedAt).toISOString()})),
+      thread_data:Object.fromEntries(threads.map(t=>[t.id,loadThread(t.id)])),
+      viewed:viewed.map(id=>{const p=prods.find(x=>x.id===id);return p?{product_id:id,product_json:JSON.stringify(p)}:null;}).filter(Boolean) as any,
+    };
+  },[saved,buys,searches,threads,viewed,prods]);
+
+  // --- Persist state to localStorage + background sync ---
   useEffect(()=>saveState(STORE_KEYS.user, user),[user]);
-  useEffect(()=>saveState(STORE_KEYS.saved, saved),[saved]);
-  useEffect(()=>saveState(STORE_KEYS.viewed, viewed),[viewed]);
-  useEffect(()=>saveState(STORE_KEYS.buys, buys),[buys]);
+  useEffect(()=>{saveState(STORE_KEYS.saved, saved);if(isLoggedIn())schedulePush(collectSyncPayload);},[saved]);
+  useEffect(()=>{saveState(STORE_KEYS.viewed, viewed);if(isLoggedIn())schedulePush(collectSyncPayload);},[viewed]);
+  useEffect(()=>{saveState(STORE_KEYS.buys, buys);if(isLoggedIn())schedulePush(collectSyncPayload);},[buys]);
   useEffect(()=>saveState(STORE_KEYS.prods, prods),[prods]);
-  useEffect(()=>saveState(STORE_KEYS.searches, searches),[searches]);
+  useEffect(()=>{saveState(STORE_KEYS.searches, searches);if(isLoggedIn())schedulePush(collectSyncPayload);},[searches]);
   useEffect(()=>saveState(STORE_KEYS.homeData, homeData),[homeData]);
-  useEffect(()=>saveState(STORE_KEYS.threads, threads),[threads]);
-  // Auto-save active thread data
+  useEffect(()=>{saveState(STORE_KEYS.threads, threads);if(isLoggedIn())schedulePush(collectSyncPayload);},[threads]);
+  // Auto-save active thread data + sync
   useEffect(()=>{
-    if(activeThreadId){saveThread(activeThreadId,{msgs,hist:histRef.current,cache:searchCache.current});}
+    if(activeThreadId){saveThread(activeThreadId,{msgs,hist:histRef.current,cache:searchCache.current});if(isLoggedIn())schedulePush(collectSyncPayload);}
   },[msgs,activeThreadId]);
 
   // Thread operations
@@ -526,12 +545,51 @@ Use realistic specs for this product type. Keep description under 50 words.`;
         {onboardStep===0&&(<div>
           <div style={{fontSize:40,marginBottom:16}}>🛍️</div>
           <h1 style={{fontSize:26,fontWeight:700,marginBottom:4}}>Welcome to SmartShop</h1>
-          <p style={{fontSize:14,color:"#888",marginBottom:32,lineHeight:1.5}}>Your AI-powered personal shopping assistant. Let's set up your profile for personalized recommendations.</p>
-          <label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6}}>Name</label>
-          <input style={s.inp} placeholder="Your name" value={formData.name} onChange={e=>setFormData(p=>({...p,name:e.target.value}))}/>
-          <label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6,marginTop:16}}>Email</label>
-          <input style={s.inp} placeholder="you@email.com" type="email" value={formData.email} onChange={e=>setFormData(p=>({...p,email:e.target.value}))}/>
-          <button disabled={!formData.name.trim()} onClick={()=>setOnboardStep(1)} style={{...s.btn(),marginTop:24,opacity:formData.name.trim()?1:0.5}}>Continue</button>
+          <p style={{fontSize:14,color:"#888",marginBottom:32,lineHeight:1.5}}>{loginMode?"Sign in to sync your data across devices.":"Your AI-powered personal shopping assistant. Let's set up your profile."}</p>
+          {authErr&&<div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:13,color:"#dc2626"}}>{authErr}</div>}
+          {!loginMode&&<><label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6}}>Name</label>
+          <input style={s.inp} placeholder="Your name" value={formData.name} onChange={e=>setFormData(p=>({...p,name:e.target.value}))}/></>}
+          <label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6,marginTop:loginMode?0:16}}>Email</label>
+          <input style={s.inp} placeholder="you@email.com" type="email" value={formData.email} onChange={e=>{setFormData(p=>({...p,email:e.target.value}));setAuthErr("");}}/>
+          <label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6,marginTop:16}}>Password</label>
+          <input style={s.inp} placeholder={loginMode?"Your password":"Create a password (6+ chars)"} type="password" value={password} onChange={e=>{setPassword(e.target.value);setAuthErr("");}}/>
+          {!loginMode&&<><label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6,marginTop:16}}>Confirm Password</label>
+          <input style={s.inp} placeholder="Confirm password" type="password" value={confirmPw} onChange={e=>{setConfirmPw(e.target.value);setAuthErr("");}}/></>}
+          {loginMode?
+            <button disabled={authLoading||!formData.email.trim()||!password} onClick={async()=>{
+              setAuthErr("");setAuthLoading(true);
+              try{
+                const{user:u}=await apiLogin(formData.email.trim(),password);
+                const data=await pullSync();
+                if(data){
+                  if(data.saved)setSaved(data.saved.map(s=>s.product_id));
+                  if(data.searches)setSearches(data.searches);
+                  if(data.buys)setBuys(data.buys.map(b=>({pid:b.product_id,date:b.purchased_at,ret:b.retailer})));
+                  if(data.viewed)setViewed(data.viewed.map(v=>v.product_id));
+                  const serverProds=[...(data.saved||[]),...(data.viewed||[])].map(x=>{try{return JSON.parse(x.product_json)}catch{return null}}).filter(Boolean);
+                  if(serverProds.length)setProds(prev=>{const ids=new Set(prev.map(p=>p.id));return[...prev,...serverProds.filter(p=>!ids.has(p.id))];});
+                  if(data.threads&&data.threads.length){
+                    const ts=data.threads.map(t=>({id:t.thread_cid,name:t.name,createdAt:new Date(t.created_at).getTime(),updatedAt:new Date(t.updated_at).getTime()}));
+                    setThreads(ts);
+                    if(data.thread_data){for(const[cid,td] of Object.entries(data.thread_data)){saveThread(cid,td);}}
+                    setActiveThreadId(ts[0].id);
+                  }
+                }
+                setUser(u);setPassword("");setConfirmPw("");
+              }catch(e:any){setAuthErr(e.message||"Login failed")}
+              finally{setAuthLoading(false)}
+            }} style={{...s.btn(),marginTop:24,opacity:(!formData.email.trim()||!password||authLoading)?0.5:1}}>
+              {authLoading?"Signing in...":"Sign In"}
+            </button>
+          :
+            <button disabled={authLoading||!formData.name.trim()||!formData.email.trim()||password.length<6||password!==confirmPw} onClick={()=>{
+              if(password!==confirmPw){setAuthErr("Passwords don't match");return;}
+              setOnboardStep(1);setAuthErr("");
+            }} style={{...s.btn(),marginTop:24,opacity:(!formData.name.trim()||!formData.email.trim()||password.length<6||password!==confirmPw)?0.5:1}}>Continue</button>
+          }
+          <div onClick={()=>{setLoginMode(!loginMode);setAuthErr("");setPassword("");setConfirmPw("");}} style={{textAlign:"center",marginTop:16,fontSize:13,color:"#7c3aed",cursor:"pointer",fontWeight:500}}>
+            {loginMode?"Don't have an account? Sign up":"Already have an account? Sign in"}
+          </div>
         </div>)}
         {onboardStep===1&&(<div>
           <div style={{fontSize:14,color:"#888",marginBottom:4}}>Step 1 of 3</div>
@@ -566,9 +624,16 @@ Use realistic specs for this product type. Keep description under 50 words.`;
           <Chips options={["Skincare","Haircare","Electronics","Fashion","Fitness","Home & Kitchen","Books","Gaming","Outdoor","Beauty","Tech Gadgets","Wellness"]} selected={formData.interests} onToggle={v=>setFormData(p=>({...p,interests:p.interests.includes(v)?p.interests.filter(x=>x!==v):[...p.interests,v]}))}/>
           <div style={{display:"flex",gap:10,marginTop:24}}>
             <button onClick={()=>setOnboardStep(2)} style={{...s.btn("s"),flex:1}}>Back</button>
-            <button onClick={()=>setUser({...formData})} style={{...s.btn(),flex:2}}>Start Shopping</button>
+            <button disabled={authLoading} onClick={async()=>{
+              setAuthErr("");setAuthLoading(true);
+              try{
+                await apiRegister({...formData,email:formData.email.trim()},password);
+                setUser({...formData});setPassword("");setConfirmPw("");
+              }catch(e:any){setAuthErr(e.message||"Registration failed");setOnboardStep(0);}
+              finally{setAuthLoading(false)}
+            }} style={{...s.btn(),flex:2,opacity:authLoading?0.5:1}}>{authLoading?"Creating account...":"Start Shopping"}</button>
           </div>
-          <div onClick={()=>setUser({...formData})} style={{textAlign:"center",marginTop:12,fontSize:13,color:"#999",cursor:"pointer"}}>Skip for now</div>
+          {authErr&&<div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:10,padding:"10px 14px",marginTop:12,fontSize:13,color:"#dc2626"}}>{authErr}</div>}
         </div>)}
         <style>{`@keyframes bop{0%,100%{opacity:.4;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}`}</style>
       </div>
@@ -819,9 +884,19 @@ Use realistic specs for this product type. Keep description under 50 words.`;
             <div style={{fontSize:14,color:"#555",padding:"6px 0",borderTop:"1px solid #f5f5f5"}}>Cached searches: {Object.keys(searchCache.current).length}</div>
           </div>
 
+          {/* Sync Status */}
+          {isLoggedIn()&&<div style={{background:"#fff",borderRadius:16,border:"1px solid #f0f0f0",padding:16,marginBottom:16}}>
+            <div style={{fontSize:16,fontWeight:700,marginBottom:8}}>Cloud Sync</div>
+            <div style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:"#16a34a"}}><span style={{width:8,height:8,borderRadius:4,background:"#16a34a",display:"inline-block"}}></span>Synced to cloud</div>
+            {getLastSyncTime()&&<div style={{fontSize:11,color:"#999",marginTop:4}}>Last sync: {new Date(getLastSyncTime()!).toLocaleString()}</div>}
+          </div>}
+
           <button onClick={()=>{setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};setErr(null);threadVolatileRef.current={};setCompareIds([]);setShowCompare(false);const t=createThread();setThreads([t]);setActiveThreadId(t.id);clearAllState();saveState(STORE_KEYS.user,user);saveState(STORE_KEYS.threads,[t]);}} style={{...s.btn("s"),color:"#ef4444"}}>Clear All Data</button>
-          <button onClick={()=>{setUser(null);setOnboardStep(0);setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};threadVolatileRef.current={};setCompareIds([]);setShowCompare(false);setThreads([]);setActiveThreadId(null);clearAllState();}} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
-          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v5.0</div>
+          <button onClick={async()=>{
+            try{await apiLogout();}catch{}
+            setUser(null);setOnboardStep(0);setLoginMode(false);setPassword("");setConfirmPw("");setAuthErr("");setMsgs([]);histRef.current=[];setProds([]);setViewed([]);setSaved([]);setBuys([]);setSearches([]);setHomeData(null);homeDataSearchCount.current=0;homeRecoveryAttempted.current=false;searchCache.current={};threadVolatileRef.current={};setCompareIds([]);setShowCompare(false);setThreads([]);setActiveThreadId(null);clearAllState();
+          }} style={{...s.btn("s"),marginTop:8,color:"#888"}}>Log Out</button>
+          <div style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:12}}>SmartShop v6.0</div>
         </div>
       </>)}
 

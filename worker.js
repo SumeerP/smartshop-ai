@@ -1,25 +1,33 @@
 /**
  * SmartShop AI — Cloudflare Worker Proxy
  *
- * Proxies requests to Anthropic API + provides product image search.
+ * Proxies requests to Anthropic API + provides product image search + user auth & sync.
  * API key stored as Cloudflare secret (never exposed to browser).
  *
  * ENDPOINTS:
- *   POST /          — Anthropic API proxy
- *   GET  /product-image?asin=XXX  — Fetch Amazon product image by ASIN
- *   GET  /search-image?q=XXX     — Search Google for product image
+ *   POST /                     — Anthropic API proxy
+ *   GET  /product-image?asin=  — Fetch Amazon product image by ASIN
+ *   GET  /search-image?q=      — Search Google for product image
+ *   POST /api/auth/register    — Create account (email + password)
+ *   POST /api/auth/login       — Login (email + password → session token)
+ *   POST /api/auth/logout      — Invalidate session token
+ *   PATCH /api/user/profile    — Update profile fields
+ *   POST /api/sync/push        — Push local state to D1
+ *   GET  /api/sync/pull        — Pull full user state from D1
  */
 
 const ALLOWED_ORIGINS = [
   'https://sumeerp.github.io',
   'http://localhost:3000',
   'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
   'http://127.0.0.1:5500',
 ];
 
 const CORS_HEADERS = {
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Session-Token',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -49,18 +57,58 @@ function checkRateLimit(ip) {
   return true;
 }
 
-// Image cache (in-memory, resets on worker restart, good enough for demo)
-const imageCache = new Map();
+// Hot in-memory cache (survives within single worker instance)
+const memCache = new Map();
+const KV_TTL = 604800; // 7 days in seconds
+
+/**
+ * Get image URL from cache (memory first, then KV)
+ */
+async function getCachedImage(key, env) {
+  if (memCache.has(key)) return memCache.get(key);
+  if (env.IMAGE_CACHE) {
+    try {
+      const val = await env.IMAGE_CACHE.get(key);
+      if (val) {
+        memCache.set(key, val);
+        return val;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Store image URL in cache (memory + KV)
+ */
+async function cacheImage(key, url, env) {
+  memCache.set(key, url);
+  if (env.IMAGE_CACHE) {
+    try {
+      await env.IMAGE_CACHE.put(key, url, { expirationTtl: KV_TTL });
+    } catch {}
+  }
+}
+
+const FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip',
+  'Cache-Control': 'no-cache',
+};
 
 /**
  * Extract main product image from Amazon product page HTML
  */
 function extractAmazonImage(html) {
-  // Try multiple patterns Amazon uses for main product image
   const patterns = [
+    // og:image meta tag (most reliable across page variants)
+    /property="og:image"\s+content="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
+    /content="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"\s+property="og:image"/,
     // data-old-hires attribute (high-res image)
     /data-old-hires="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
-    // colorImages JSON block (most reliable)
+    // colorImages JSON block
     /"hiRes"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
     // Main image in landing image tag
     /id="landingImage"[^>]*src="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
@@ -68,16 +116,23 @@ function extractAmazonImage(html) {
     /id="imgBlkFront"[^>]*src="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
     // Any large Amazon image
     /"large"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
+    // dynamicImageData (mobile pages)
+    /"mainUrl"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/,
     // Fallback: any media-amazon image that looks like a product image
     /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9+%-]+\._AC_S[XY]\d+_\.jpg)/,
+    // Even broader: any non-tiny Amazon product image
+    /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9+%-]+\.(?:_AC_UL\d+_|_AC_SL\d+_|jpg))/,
   ];
 
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
-      // Normalize to a good size (SX500)
       let url = match[1];
-      url = url.replace(/\._AC_S[XY]\d+_\./, '._AC_SX300_.');
+      // Normalize to 300px product image
+      url = url.replace(/\._[A-Z]{2}_[A-Z]{2,}\d*_\./, '._AC_SX300_.');
+      if (!url.includes('._AC_SX300_.')) {
+        url = url.replace(/\.jpg/, '._AC_SX300_.jpg');
+      }
       return url;
     }
   }
@@ -88,39 +143,107 @@ function extractAmazonImage(html) {
  * Extract product image from Google search results
  */
 function extractGoogleImage(html) {
-  // Google Images encodes thumbnails in the HTML
-  // Look for base64 images or direct URLs in the response
   const patterns = [
     // Direct image URLs in search results
-    /\["(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)",[0-9]+,[0-9]+\]/gi,
+    /\["(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^\"]*)?)"\s*,\s*[0-9]+\s*,\s*[0-9]+\s*\]/gi,
     // Image URLs in data attributes
     /data-src="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/gi,
     // og:image
     /content="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/gi,
+    // shopping result thumbnails
+    /src="(https:\/\/encrypted-tbn\d\.gstatic\.com\/shopping\?[^"]+)"/gi,
   ];
 
   for (const pattern of patterns) {
     const matches = [...html.matchAll(pattern)];
     for (const match of matches) {
       const url = match[1];
-      // Filter out Google's own assets, tiny icons, etc.
-      if (url.includes('gstatic.com') || url.includes('google.com') || url.includes('googleapis.com')) continue;
-      if (url.includes('amazon.com') || url.includes('media-amazon') || url.includes('ssl-images-amazon')) {
-        return url;
-      }
-      // Accept other product image sources
-      if (url.length > 40 && !url.includes('favicon') && !url.includes('logo')) {
-        return url;
-      }
+      // Skip Google's own non-product assets
+      if (url.includes('gstatic.com/images') || url.includes('google.com/images') || url.includes('googleusercontent.com')) continue;
+      // Prefer Amazon images
+      if (url.includes('media-amazon') || url.includes('ssl-images-amazon')) return url;
+      // Accept Google Shopping thumbnails (these are reliable product images)
+      if (url.includes('gstatic.com/shopping')) return url;
+      // Accept other product image sources (not icons/logos)
+      if (url.length > 40 && !url.includes('favicon') && !url.includes('logo') && !url.includes('pixel')) return url;
     }
   }
   return null;
 }
 
 /**
+ * Try fetching Amazon product page image
+ */
+async function tryAmazonImage(asin) {
+  // Strategy 1: Regular product page
+  try {
+    const response = await fetch(`https://www.amazon.com/dp/${asin}`, {
+      headers: FETCH_HEADERS,
+      redirect: 'follow',
+    });
+    if (response.ok) {
+      const html = await response.text();
+      const url = extractAmazonImage(html);
+      if (url) return url;
+    }
+  } catch {}
+
+  // Strategy 2: Mobile product page (often less protected)
+  try {
+    const response = await fetch(`https://www.amazon.com/gp/aw/d/${asin}`, {
+      headers: {
+        ...FETCH_HEADERS,
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+      },
+      redirect: 'follow',
+    });
+    if (response.ok) {
+      const html = await response.text();
+      const url = extractAmazonImage(html);
+      if (url) return url;
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
+ * Try Google Shopping search for product image
+ */
+async function tryGoogleImage(query) {
+  // Strategy 1: Google Shopping search (better product images)
+  try {
+    const response = await fetch(
+      `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=shop`,
+      { headers: FETCH_HEADERS }
+    );
+    if (response.ok) {
+      const html = await response.text();
+      const url = extractGoogleImage(html);
+      if (url) return url;
+    }
+  } catch {}
+
+  // Strategy 2: Regular Google Images search
+  try {
+    const response = await fetch(
+      `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=isch&source=lnms`,
+      { headers: FETCH_HEADERS }
+    );
+    if (response.ok) {
+      const html = await response.text();
+      const url = extractGoogleImage(html);
+      if (url) return url;
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
  * Handle Amazon product image request
  */
-async function handleProductImage(asin, corsHeaders) {
+async function handleProductImage(asin, corsHeaders, env) {
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
     return new Response(JSON.stringify({ error: 'Invalid ASIN' }), {
       status: 400,
@@ -128,59 +251,44 @@ async function handleProductImage(asin, corsHeaders) {
     });
   }
 
-  // Check cache
-  if (imageCache.has(asin)) {
-    return new Response(JSON.stringify({ imageUrl: imageCache.get(asin), source: 'cache' }), {
+  // Check cache (memory + KV)
+  const cached = await getCachedImage(`asin:${asin}`, env);
+  if (cached) {
+    return new Response(JSON.stringify({ imageUrl: cached, source: 'cache' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
     });
   }
 
-  try {
-    // Fetch Amazon product page
-    const amazonUrl = `https://www.amazon.com/dp/${asin}`;
-    const response = await fetch(amazonUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      redirect: 'follow',
-    });
+  // Try Amazon directly
+  let imageUrl = await tryAmazonImage(asin);
 
-    if (!response.ok) {
-      throw new Error(`Amazon returned ${response.status}`);
-    }
-
-    const html = await response.text();
-    const imageUrl = extractAmazonImage(html);
-
-    if (imageUrl) {
-      imageCache.set(asin, imageUrl);
-      return new Response(JSON.stringify({ imageUrl, source: 'amazon' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
-      });
-    }
-
-    // Fallback: try Google Image search
-    return await handleSearchImage(`amazon ${asin} product`, corsHeaders, asin);
-
-  } catch (err) {
-    // Fallback to Google search
-    try {
-      return await handleSearchImage(`amazon ${asin} product`, corsHeaders, asin);
-    } catch {
-      return new Response(JSON.stringify({ error: 'Could not fetch image', details: err.message }), {
-        status: 502,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
+  // Fallback: Google search
+  if (!imageUrl) {
+    imageUrl = await tryGoogleImage(`amazon ${asin} product`);
   }
+
+  // Broader fallback: search by ASIN only
+  if (!imageUrl) {
+    imageUrl = await tryGoogleImage(`${asin} product image`);
+  }
+
+  if (imageUrl) {
+    await cacheImage(`asin:${asin}`, imageUrl, env);
+    return new Response(JSON.stringify({ imageUrl, source: 'fetched' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
+    });
+  }
+
+  return new Response(JSON.stringify({ error: 'No image found' }), {
+    status: 404,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
 }
 
 /**
  * Handle Google image search request
  */
-async function handleSearchImage(query, corsHeaders, cacheKey) {
+async function handleSearchImage(query, corsHeaders, env) {
   if (!query) {
     return new Response(JSON.stringify({ error: 'Missing query parameter' }), {
       status: 400,
@@ -188,44 +296,323 @@ async function handleSearchImage(query, corsHeaders, cacheKey) {
     });
   }
 
-  const key = cacheKey || query;
-  if (imageCache.has(key)) {
-    return new Response(JSON.stringify({ imageUrl: imageCache.get(key), source: 'cache' }), {
+  const key = `q:${query}`;
+  const cached = await getCachedImage(key, env);
+  if (cached) {
+    return new Response(JSON.stringify({ imageUrl: cached, source: 'cache' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
     });
   }
 
-  try {
-    // Use Google Images search
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=isch&source=lnms`;
-    const response = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
+  const imageUrl = await tryGoogleImage(query);
+
+  if (imageUrl) {
+    await cacheImage(key, imageUrl, env);
+    return new Response(JSON.stringify({ imageUrl, source: 'google' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
     });
+  }
 
-    const html = await response.text();
-    const imageUrl = extractGoogleImage(html);
+  return new Response(JSON.stringify({ error: 'No image found' }), {
+    status: 404,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
 
-    if (imageUrl) {
-      imageCache.set(key, imageUrl);
-      return new Response(JSON.stringify({ imageUrl, source: 'google' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
-      });
+// ============================================================
+// AUTH & SYNC — User identity + data persistence via D1
+// ============================================================
+
+// Auth rate limiting (stricter: 5 per minute per IP)
+const authRateLimits = new Map();
+function checkAuthRateLimit(ip) {
+  const now = Date.now();
+  const entry = authRateLimits.get(ip);
+  if (!entry || now - entry.windowStart > 60000) {
+    authRateLimits.set(ip, { windowStart: now, count: 1 });
+    return true;
+  }
+  if (entry.count >= 5) return false;
+  entry.count++;
+  return true;
+}
+
+function json(data, status, corsHeaders) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+/**
+ * PBKDF2 password hashing (Web Crypto API — native in Workers)
+ */
+async function hashPassword(password, salt) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' },
+    key, 256
+  );
+  return btoa(String.fromCharCode(...new Uint8Array(bits)));
+}
+
+/**
+ * Validate session token → return user row or null
+ */
+async function authenticate(request, env) {
+  const token = request.headers.get('X-Session-Token');
+  if (!token || !env.DB) return null;
+  try {
+    return await env.DB.prepare(
+      'SELECT id, email, name, gender, age, skin, hair, interests, budget FROM users WHERE session_token = ?'
+    ).bind(token).first();
+  } catch { return null; }
+}
+
+function userToProfile(row) {
+  return {
+    name: row.name, email: row.email, gender: row.gender || '',
+    age: row.age || '', skin: row.skin || '', hair: row.hair || '',
+    interests: JSON.parse(row.interests || '[]'), budget: row.budget || 'moderate',
+  };
+}
+
+/**
+ * POST /api/auth/register — Create account or return existing
+ */
+async function handleRegister(request, env, corsHeaders) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!checkAuthRateLimit(ip)) return json({ error: 'Too many attempts. Try again later.' }, 429, corsHeaders);
+  if (!env.DB) return json({ error: 'Database not configured' }, 500, corsHeaders);
+
+  try {
+    const body = await request.json();
+    const { email, password, name, gender, age, skin, hair, interests, budget } = body;
+
+    if (!email || !password || !name) return json({ error: 'Email, password, and name are required' }, 400, corsHeaders);
+    if (password.length < 6) return json({ error: 'Password must be at least 6 characters' }, 400, corsHeaders);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'Invalid email format' }, 400, corsHeaders);
+
+    // Check if email already exists
+    const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+    if (existing) return json({ error: 'An account with this email already exists. Please log in.' }, 409, corsHeaders);
+
+    const salt = crypto.randomUUID();
+    const hash = await hashPassword(password, salt);
+    const token = crypto.randomUUID();
+
+    await env.DB.prepare(
+      `INSERT INTO users (email, name, password_hash, password_salt, gender, age, skin, hair, interests, budget, session_token)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      email.toLowerCase(), name, hash, salt,
+      gender || '', age || '', skin || '', hair || '',
+      JSON.stringify(interests || []), budget || 'moderate', token
+    ).run();
+
+    const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+    return json({ user: userToProfile(user), sessionToken: token, isNew: true }, 201, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Registration failed: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * POST /api/auth/login — Email + password login
+ */
+async function handleLogin(request, env, corsHeaders) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!checkAuthRateLimit(ip)) return json({ error: 'Too many attempts. Try again later.' }, 429, corsHeaders);
+  if (!env.DB) return json({ error: 'Database not configured' }, 500, corsHeaders);
+
+  try {
+    const { email, password } = await request.json();
+    if (!email || !password) return json({ error: 'Email and password are required' }, 400, corsHeaders);
+
+    const user = await env.DB.prepare(
+      'SELECT id, email, name, password_hash, password_salt, gender, age, skin, hair, interests, budget FROM users WHERE email = ?'
+    ).bind(email.toLowerCase()).first();
+    if (!user) return json({ error: 'No account found with this email' }, 404, corsHeaders);
+
+    const hash = await hashPassword(password, user.password_salt);
+    if (hash !== user.password_hash) return json({ error: 'Incorrect password' }, 401, corsHeaders);
+
+    const token = crypto.randomUUID();
+    await env.DB.prepare('UPDATE users SET session_token = ?, updated_at = datetime(\'now\') WHERE id = ?').bind(token, user.id).run();
+
+    return json({ user: userToProfile(user), sessionToken: token }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Login failed: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * POST /api/auth/logout — Invalidate session
+ */
+async function handleLogout(request, env, corsHeaders) {
+  const user = await authenticate(request, env);
+  if (!user) return json({ error: 'Not authenticated' }, 401, corsHeaders);
+  await env.DB.prepare('UPDATE users SET session_token = NULL WHERE id = ?').bind(user.id).run();
+  return json({ ok: true }, 200, corsHeaders);
+}
+
+/**
+ * PATCH /api/user/profile — Update profile fields
+ */
+async function handleProfileUpdate(request, env, corsHeaders) {
+  const user = await authenticate(request, env);
+  if (!user) return json({ error: 'Not authenticated' }, 401, corsHeaders);
+
+  try {
+    const updates = await request.json();
+    const allowed = ['name', 'gender', 'age', 'skin', 'hair', 'budget'];
+    const sets = [];
+    const vals = [];
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        vals.push(updates[key]);
+      }
+    }
+    if (updates.interests !== undefined) {
+      sets.push('interests = ?');
+      vals.push(JSON.stringify(updates.interests));
+    }
+    if (sets.length === 0) return json({ error: 'No valid fields to update' }, 400, corsHeaders);
+    sets.push("updated_at = datetime('now')");
+    vals.push(user.id);
+
+    await env.DB.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run();
+    const updated = await env.DB.prepare(
+      'SELECT id, email, name, gender, age, skin, hair, interests, budget FROM users WHERE id = ?'
+    ).bind(user.id).first();
+    return json({ user: userToProfile(updated) }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Update failed: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * POST /api/sync/push — Push local state to D1
+ */
+async function handleSyncPush(request, env, corsHeaders) {
+  const user = await authenticate(request, env);
+  if (!user) return json({ error: 'Not authenticated' }, 401, corsHeaders);
+
+  try {
+    const data = await request.json();
+    const uid = user.id;
+    const stmts = [];
+
+    // Saved products
+    if (data.saved && Array.isArray(data.saved)) {
+      for (const s of data.saved) {
+        if (s.product_id && s.product_json) {
+          stmts.push(env.DB.prepare(
+            'INSERT OR REPLACE INTO saved_products (user_id, product_id, product_json) VALUES (?, ?, ?)'
+          ).bind(uid, s.product_id, s.product_json));
+        }
+      }
     }
 
-    return new Response(JSON.stringify({ error: 'No image found' }), {
-      status: 404,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    // Purchases
+    if (data.buys && Array.isArray(data.buys)) {
+      for (const b of data.buys) {
+        if (b.product_id && b.purchased_at) {
+          stmts.push(env.DB.prepare(
+            'INSERT OR IGNORE INTO purchases (user_id, product_id, product_json, retailer, purchased_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(uid, b.product_id, b.product_json || '{}', b.retailer || '', b.purchased_at));
+        }
+      }
+    }
 
+    // Searches (append only, ignore duplicates within same second)
+    if (data.searches && Array.isArray(data.searches)) {
+      for (const q of data.searches) {
+        if (q) {
+          stmts.push(env.DB.prepare(
+            'INSERT INTO search_history (user_id, query) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM search_history WHERE user_id = ? AND query = ? ORDER BY searched_at DESC LIMIT 1)'
+          ).bind(uid, q, uid, q));
+        }
+      }
+    }
+
+    // Threads
+    if (data.threads && Array.isArray(data.threads)) {
+      for (const t of data.threads) {
+        if (t.thread_cid) {
+          stmts.push(env.DB.prepare(
+            'INSERT OR REPLACE INTO threads (user_id, thread_cid, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(uid, t.thread_cid, t.name || 'New Chat', t.created_at || new Date().toISOString(), t.updated_at || new Date().toISOString()));
+        }
+      }
+    }
+
+    // Thread data
+    if (data.thread_data && typeof data.thread_data === 'object') {
+      for (const [cid, td] of Object.entries(data.thread_data)) {
+        stmts.push(env.DB.prepare(
+          "INSERT OR REPLACE INTO thread_data (user_id, thread_cid, data_json, updated_at) VALUES (?, ?, ?, datetime('now'))"
+        ).bind(uid, cid, JSON.stringify(td)));
+      }
+    }
+
+    // Viewed products
+    if (data.viewed && Array.isArray(data.viewed)) {
+      for (const v of data.viewed) {
+        if (v.product_id && v.product_json) {
+          stmts.push(env.DB.prepare(
+            "INSERT OR REPLACE INTO viewed_products (user_id, product_id, product_json, viewed_at) VALUES (?, ?, ?, datetime('now'))"
+          ).bind(uid, v.product_id, v.product_json));
+        }
+      }
+    }
+
+    // Execute all in batch
+    if (stmts.length > 0) {
+      await env.DB.batch(stmts);
+    }
+
+    return json({ ok: true, synced_at: new Date().toISOString(), statements: stmts.length }, 200, corsHeaders);
   } catch (err) {
-    return new Response(JSON.stringify({ error: 'Search failed', details: err.message }), {
-      status: 502,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    return json({ error: 'Sync push failed: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * GET /api/sync/pull — Pull full user state from D1
+ */
+async function handleSyncPull(request, env, corsHeaders) {
+  const user = await authenticate(request, env);
+  if (!user) return json({ error: 'Not authenticated' }, 401, corsHeaders);
+
+  try {
+    const uid = user.id;
+
+    const [savedRows, buyRows, searchRows, threadRows, threadDataRows, viewedRows] = await Promise.all([
+      env.DB.prepare('SELECT product_id, product_json FROM saved_products WHERE user_id = ? ORDER BY created_at DESC').bind(uid).all(),
+      env.DB.prepare('SELECT product_id, product_json, retailer, purchased_at FROM purchases WHERE user_id = ? ORDER BY purchased_at DESC').bind(uid).all(),
+      env.DB.prepare('SELECT query FROM search_history WHERE user_id = ? ORDER BY searched_at DESC LIMIT 200').bind(uid).all(),
+      env.DB.prepare('SELECT thread_cid, name, created_at, updated_at FROM threads WHERE user_id = ? ORDER BY updated_at DESC').bind(uid).all(),
+      env.DB.prepare('SELECT thread_cid, data_json FROM thread_data WHERE user_id = ?').bind(uid).all(),
+      env.DB.prepare('SELECT product_id, product_json FROM viewed_products WHERE user_id = ? ORDER BY viewed_at DESC LIMIT 100').bind(uid).all(),
+    ]);
+
+    return json({
+      user: userToProfile(user),
+      saved: savedRows.results || [],
+      buys: buyRows.results || [],
+      searches: (searchRows.results || []).map(r => r.query),
+      threads: threadRows.results || [],
+      thread_data: Object.fromEntries(
+        (threadDataRows.results || []).map(r => [r.thread_cid, JSON.parse(r.data_json || '{}')])
+      ),
+      viewed: viewedRows.results || [],
+      synced_at: new Date().toISOString(),
+    }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Sync pull failed: ' + err.message }, 500, corsHeaders);
   }
 }
 
@@ -265,6 +652,7 @@ async function handleApiProxy(request, env, corsHeaders) {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31',
       },
       body: JSON.stringify(body),
     });
@@ -305,16 +693,41 @@ export default {
     // Route: GET /product-image?asin=XXX
     if (request.method === 'GET' && url.pathname === '/product-image') {
       const asin = url.searchParams.get('asin');
-      return handleProductImage(asin, corsHeaders);
+      return handleProductImage(asin, corsHeaders, env);
     }
 
     // Route: GET /search-image?q=XXX
     if (request.method === 'GET' && url.pathname === '/search-image') {
       const query = url.searchParams.get('q');
-      return handleSearchImage(query, corsHeaders);
+      return handleSearchImage(query, corsHeaders, env);
     }
 
-    // Route: POST / — Anthropic API proxy
+    // Route: POST /api/auth/register
+    if (request.method === 'POST' && url.pathname === '/api/auth/register') {
+      return handleRegister(request, env, corsHeaders);
+    }
+    // Route: POST /api/auth/login
+    if (request.method === 'POST' && url.pathname === '/api/auth/login') {
+      return handleLogin(request, env, corsHeaders);
+    }
+    // Route: POST /api/auth/logout
+    if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
+      return handleLogout(request, env, corsHeaders);
+    }
+    // Route: PATCH /api/user/profile
+    if (request.method === 'PATCH' && url.pathname === '/api/user/profile') {
+      return handleProfileUpdate(request, env, corsHeaders);
+    }
+    // Route: POST /api/sync/push
+    if (request.method === 'POST' && url.pathname === '/api/sync/push') {
+      return handleSyncPush(request, env, corsHeaders);
+    }
+    // Route: GET /api/sync/pull
+    if (request.method === 'GET' && url.pathname === '/api/sync/pull') {
+      return handleSyncPull(request, env, corsHeaders);
+    }
+
+    // Route: POST / — Anthropic API proxy (catch-all, must be LAST)
     if (request.method === 'POST') {
       return handleApiProxy(request, env, corsHeaders);
     }

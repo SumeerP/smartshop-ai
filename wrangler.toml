@@ -4,3 +4,13 @@ compatibility_date = "2024-01-01"
 
 # The ANTHROPIC_API_KEY is set via `wrangler secret put ANTHROPIC_API_KEY`
 # It is never committed to source code.
+
+[[kv_namespaces]]
+binding = "IMAGE_CACHE"
+id = "7be754b81e274d23a0de2862a489e098"
+preview_id = "df207b25051b4492a4dbffcb8049bb2f"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "smartshop-users"
+database_id = "e2104082-a6f2-4761-8a7b-4e8a411cde59"
