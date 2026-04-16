@@ -200,18 +200,22 @@ function mapAmazonProduct(item, index) {
   const priceStr = typeof item.price === 'string' ? item.price : String(item.price || '');
   const price = parseFloat(priceStr.replace(/[^0-9.]/g, '')) || null;
   const thumbnail = item.image || item.thumbnail || '';
+  // ScrapingDog Amazon: URL is in 'url' field, ASIN must be extracted from it
+  const productUrl = item.url || item.link || '';
+  const asinMatch = productUrl.match(/\/dp\/([A-Z0-9]{10})/);
+  const asin = item.asin || (asinMatch ? asinMatch[1] : '');
   return {
     id: `amz-${Date.now()}-${index}`,
     name: item.title || 'Unknown Product',
     price,
-    rating: item.rating ? parseFloat(item.rating) : null,
+    rating: item.stars ? parseFloat(item.stars) : (item.rating ? parseFloat(item.rating) : null),
     reviews: item.total_reviews ? parseInt(String(item.total_reviews).replace(/[^0-9]/g, '')) : null,
     retailer: 'Amazon',
     cat: '',
     img: '',
     thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
-    url: item.link || (item.asin ? `https://www.amazon.com/dp/${item.asin}` : ''),
-    asin: item.asin || '',
+    url: productUrl || (asin ? `https://www.amazon.com/dp/${asin}` : ''),
+    asin,
     deal: !!item.is_deal || !!item.coupon_text,
     dealPct: item.savings_percentage ? parseInt(item.savings_percentage) : 0,
     why: '',
@@ -219,7 +223,7 @@ function mapAmazonProduct(item, index) {
     source_api: 'scrapingdog_amazon',
     delivery: item.delivery || '',
     extensions: [],
-    tag: item.badge || item.amazon_choice || '',
+    tag: item.is_best_sellet ? 'Best Seller' : (item.is_amazon_choice ? "Amazon's Choice" : (item.badge || '')),
     snippet: '',
     dataSource: 'scrapingdog',
     fetchedAt: new Date().toISOString(),
@@ -242,7 +246,7 @@ function mapGoogleShoppingProduct(item, index) {
     cat: '',
     img: '',
     thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
-    url: item.link || item.product_link || '',
+    url: item.product_link || item.link || item.url || '',
     asin: '',
     deal: hasDeal,
     dealPct,
