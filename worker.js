@@ -14,6 +14,9 @@
  *   PATCH /api/user/profile    — Update profile fields
  *   POST /api/sync/push        — Push local state to D1
  *   GET  /api/sync/pull        — Pull full user state from D1
+ *   GET  /api/search-products  — SerpAPI Google Shopping search (cached)
+ *   GET  /api/product-details  — SerpAPI product details + reviews (cached)
+ *   GET  /api/search-quota     — Today's SerpAPI usage vs daily limit
  */
 
 const ALLOWED_ORIGINS = [
@@ -89,6 +92,304 @@ async function cacheImage(key, url, env) {
     } catch {}
   }
 }
+
+// ============================================================
+// SERPAPI — Real product data from Google Shopping
+// ============================================================
+
+const SERPAPI_DAILY_LIMIT = 8; // Free tier: 250/month ≈ 8/day
+const SEARCH_CACHE_TTL_HOURS = 24;
+const DETAIL_CACHE_TTL_DAYS = 7;
+
+async function sha256(text) {
+  const data = new TextEncoder().encode(text.toLowerCase().trim());
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function getApiUsage(env) {
+  if (!env.DB) return 0;
+  const dateKey = new Date().toISOString().slice(0, 10);
+  const row = await env.DB.prepare(
+    'SELECT call_count FROM api_usage WHERE api_name = ? AND date_key = ?'
+  ).bind('serpapi', dateKey).first();
+  return row ? row.call_count : 0;
+}
+
+async function incrementApiUsage(env) {
+  if (!env.DB) return;
+  const dateKey = new Date().toISOString().slice(0, 10);
+  await env.DB.prepare(
+    `INSERT INTO api_usage (api_name, date_key, call_count) VALUES ('serpapi', ?, 1)
+     ON CONFLICT(api_name, date_key) DO UPDATE SET call_count = call_count + 1`
+  ).bind(dateKey).run();
+}
+
+// Image URL validation
+const VALID_IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|webp|gif|avif|svg)(\?|$)/i;
+const VALID_IMAGE_DOMAINS = ['media-amazon.com', 'images-amazon.com', 'gstatic.com', 'googleusercontent.com', 'target.com', 'walmart.com', 'bestbuy.com'];
+function isValidImageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && (
+      VALID_IMAGE_EXTENSIONS.test(url) ||
+      VALID_IMAGE_DOMAINS.some(d => parsed.hostname.endsWith(d))
+    );
+  } catch { return false; }
+}
+
+function mapSerpProduct(item, index) {
+  const asinMatch = (item.product_link || '').match(/\/dp\/([A-Z0-9]{10})/);
+  const asin = asinMatch ? asinMatch[1] : '';
+  const price = item.extracted_price != null ? item.extracted_price : null;
+  const oldPrice = item.extracted_old_price || null;
+  const hasDeal = oldPrice != null && price != null && oldPrice > price;
+  const dealPct = hasDeal ? Math.round((1 - price / oldPrice) * 100) : 0;
+  const thumbnail = item.thumbnail || '';
+
+  return {
+    id: `serp-${Date.now()}-${index}`,
+    name: item.title || 'Unknown Product',
+    price,
+    rating: item.rating != null ? item.rating : null,
+    reviews: item.reviews != null ? item.reviews : null,
+    retailer: item.source || 'Online',
+    cat: '',
+    img: '',
+    thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
+    url: item.product_link || item.link || '',
+    asin,
+    deal: hasDeal,
+    dealPct,
+    why: '',
+    serpapi_product_id: item.product_id || '',
+    delivery: item.delivery || '',
+    extensions: item.extensions || [],
+    tag: item.tag || '',
+    snippet: item.snippet || '',
+    dataSource: 'serpapi',
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * GET /api/search-products?q=...&num=5 — SerpAPI Google Shopping search
+ */
+async function handleSearchProducts(request, env, corsHeaders) {
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q');
+  const num = Math.min(parseInt(url.searchParams.get('num') || '5'), 10);
+
+  if (!query) return json({ error: 'Missing query parameter q' }, 400, corsHeaders);
+
+  const queryHash = await sha256(query);
+
+  // Check D1 cache (24h TTL)
+  if (env.DB) {
+    try {
+      const cached = await env.DB.prepare(
+        `SELECT results_json, created_at FROM search_cache WHERE query_hash = ? AND created_at > datetime('now', '-${SEARCH_CACHE_TTL_HOURS} hours')`
+      ).bind(queryHash).first();
+      if (cached) {
+        const products = JSON.parse(cached.results_json);
+        const usage = await getApiUsage(env);
+        return json({ products: products.slice(0, num), source: 'cache', quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+      }
+    } catch {}
+  }
+
+  // Check daily quota
+  const usage = await getApiUsage(env);
+  if (usage >= SERPAPI_DAILY_LIMIT) {
+    // Try returning stale cache (beyond TTL)
+    if (env.DB) {
+      try {
+        const stale = await env.DB.prepare(
+          'SELECT results_json, created_at FROM search_cache WHERE query_hash = ?'
+        ).bind(queryHash).first();
+        if (stale) {
+          const products = JSON.parse(stale.results_json);
+          return json({ products: products.slice(0, num), source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true, quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+        }
+      } catch {}
+    }
+    return json({ products: [], quota_exhausted: true, quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+  }
+
+  // Call SerpAPI
+  const serpApiKey = env.SERPAPI_KEY;
+  if (!serpApiKey) return json({ error: 'SerpAPI key not configured' }, 500, corsHeaders);
+
+  try {
+    const serpUrl = `https://serpapi.com/search.json?engine=google_shopping&q=${encodeURIComponent(query)}&api_key=${serpApiKey}&num=${num}&hl=en&gl=us`;
+    const serpRes = await fetch(serpUrl);
+    if (!serpRes.ok) {
+      return json({ error: 'SerpAPI request failed', status: serpRes.status }, 502, corsHeaders);
+    }
+    const serpData = await serpRes.json();
+    const shoppingResults = serpData.shopping_results || [];
+    const products = shoppingResults.slice(0, num).map((item, i) => mapSerpProduct(item, i));
+
+    // Cache in D1
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO search_cache (query_hash, query_text, results_json, result_count) VALUES (?, ?, ?, ?)'
+        ).bind(queryHash, query, JSON.stringify(products), products.length).run();
+      } catch {}
+    }
+
+    // Increment usage
+    await incrementApiUsage(env);
+    const newUsage = usage + 1;
+
+    return json({ products, source: 'serpapi', quota: { used: newUsage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'SerpAPI error: ' + err.message }, 502, corsHeaders);
+  }
+}
+
+/**
+ * GET /api/product-details?product_id=... — SerpAPI product details + reviews
+ */
+async function handleProductDetails(request, env, corsHeaders) {
+  const url = new URL(request.url);
+  const productId = url.searchParams.get('product_id');
+
+  if (!productId) return json({ error: 'Missing product_id parameter' }, 400, corsHeaders);
+
+  // Check D1 cache (7-day TTL)
+  if (env.DB) {
+    try {
+      const cached = await env.DB.prepare(
+        `SELECT details_json FROM product_details_cache WHERE product_id = ? AND created_at > datetime('now', '-${DETAIL_CACHE_TTL_DAYS} days')`
+      ).bind(productId).first();
+      if (cached) {
+        const data = JSON.parse(cached.details_json);
+        return json({ ...data, source: 'cache' }, 200, corsHeaders);
+      }
+    } catch {}
+  }
+
+  // Check quota
+  const usage = await getApiUsage(env);
+  if (usage >= SERPAPI_DAILY_LIMIT) {
+    // Try stale cache
+    if (env.DB) {
+      try {
+        const stale = await env.DB.prepare(
+          'SELECT details_json, created_at FROM product_details_cache WHERE product_id = ?'
+        ).bind(productId).first();
+        if (stale) {
+          const data = JSON.parse(stale.details_json);
+          return json({ ...data, source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true }, 200, corsHeaders);
+        }
+      } catch {}
+    }
+    return json({ details: null, reviews: [], quota_exhausted: true }, 200, corsHeaders);
+  }
+
+  // Call SerpAPI Google Product API
+  const serpApiKey = env.SERPAPI_KEY;
+  if (!serpApiKey) return json({ error: 'SerpAPI key not configured' }, 500, corsHeaders);
+
+  try {
+    const serpUrl = `https://serpapi.com/search.json?engine=google_product&product_id=${encodeURIComponent(productId)}&api_key=${serpApiKey}&hl=en&gl=us`;
+    const serpRes = await fetch(serpUrl);
+    if (!serpRes.ok) {
+      return json({ details: null, reviews: [], error: 'SerpAPI product request failed' }, 200, corsHeaders);
+    }
+    const serpData = await serpRes.json();
+
+    // Extract details (enhanced)
+    const pr = serpData.product_results || {};
+    const details = {
+      description: pr.description || '',
+      highlights: (pr.highlights || []).slice(0, 8),
+      features: (pr.extensions || []).slice(0, 5),
+      specs: {},
+      media: [],
+      typicalPrices: serpData.typical_prices || null,
+    };
+    // Extract specs from specifications
+    if (serpData.specifications) {
+      for (const group of serpData.specifications) {
+        for (const item of (group.items || [])) {
+          if (item.title && item.value) {
+            details.specs[item.title] = item.value;
+          }
+        }
+      }
+    }
+    // Extract media images (validated)
+    if (pr.media) {
+      details.media = pr.media.slice(0, 6).map(m => ({
+        link: m.link || '',
+        type: m.type || 'image',
+      })).filter(m => m.link);
+    }
+
+    // Extract reviews (enhanced with histogram & topics)
+    const reviewsData = serpData.reviews_results?.reviews || [];
+    const reviews = reviewsData.slice(0, 8).map(r => ({
+      name: r.source || r.author || 'Reviewer',
+      rating: r.rating != null ? r.rating : null,
+      date: r.date || '',
+      title: r.title || '',
+      body: r.content || r.snippet || '',
+      verified: !!r.source,
+      dataSource: 'serpapi',
+    }));
+    const ratingsHistogram = serpData.reviews_results?.ratings || [];
+    const topicFilters = (serpData.reviews_results?.filters?.topic || []).slice(0, 8);
+
+    // Extract sellers (enhanced)
+    const sellersData = serpData.sellers_results?.online_sellers || [];
+    const sellers = sellersData.slice(0, 5).map(s => ({
+      name: s.name || '',
+      price: s.base_price || s.total_price || '',
+      shipping: s.additional_price?.shipping || '',
+      url: s.link || '#',
+      rating: s.rating || null,
+      reviewCount: s.reviews || null,
+      topQualityStore: !!s.top_quality_store,
+    }));
+
+    const result = { details, reviews, sellers, ratingsHistogram, topicFilters, reviews_results: serpData.reviews_results };
+
+    // Cache
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO product_details_cache (product_id, details_json) VALUES (?, ?)'
+        ).bind(productId, JSON.stringify(result)).run();
+      } catch {}
+    }
+    await incrementApiUsage(env);
+
+    return json({ ...result, source: 'serpapi' }, 200, corsHeaders);
+  } catch (err) {
+    return json({ details: null, reviews: [], error: 'SerpAPI error: ' + err.message }, 200, corsHeaders);
+  }
+}
+
+/**
+ * GET /api/search-quota — Today's SerpAPI usage
+ */
+async function handleSearchQuota(request, env, corsHeaders) {
+  const used = await getApiUsage(env);
+  return json({
+    used,
+    limit: SERPAPI_DAILY_LIMIT,
+    remaining: Math.max(0, SERPAPI_DAILY_LIMIT - used),
+    date: new Date().toISOString().slice(0, 10),
+  }, 200, corsHeaders);
+}
+
+// ============================================================
+// IMAGE SCRAPING
+// ============================================================
 
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -725,6 +1026,19 @@ export default {
     // Route: GET /api/sync/pull
     if (request.method === 'GET' && url.pathname === '/api/sync/pull') {
       return handleSyncPull(request, env, corsHeaders);
+    }
+
+    // Route: GET /api/search-products?q=...
+    if (request.method === 'GET' && url.pathname === '/api/search-products') {
+      return handleSearchProducts(request, env, corsHeaders);
+    }
+    // Route: GET /api/product-details?product_id=...
+    if (request.method === 'GET' && url.pathname === '/api/product-details') {
+      return handleProductDetails(request, env, corsHeaders);
+    }
+    // Route: GET /api/search-quota
+    if (request.method === 'GET' && url.pathname === '/api/search-quota') {
+      return handleSearchQuota(request, env, corsHeaders);
     }
 
     // Route: POST / — Anthropic API proxy (catch-all, must be LAST)

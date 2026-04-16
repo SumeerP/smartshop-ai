@@ -1,92 +1,65 @@
-# 🛍️ SmartShop AI
+# SmartShop AI
 
-AI-powered personal shopping assistant with conversational search, personalized recommendations, and smart product discovery. Built with React and Claude AI.
+AI-powered personal shopping assistant with conversational search, personalized recommendations, and real product data from Google Shopping. Built with React, Claude AI, and Cloudflare Workers.
 
-**[Live Demo →](https://sumeerp.github.io/smartshop-ai/)**
+**[Live Demo](https://sumeerp.github.io/smartshop-ai/)**
 
 ---
 
 ## Features
 
-- **Conversational AI Search** — Ask about any product in natural language and get real-time recommendations powered by Claude with web search
-- **Personalized Profile** — Onboarding captures gender, age, skin type, hair type, interests, and budget to tailor every suggestion
-- **Smart Home Feed** — Deals, trending searches, popular purchases, and "because you searched" sections update dynamically
-- **Product Details** — Star ratings, reviews, retailer info, "Why Recommended" explanations, and direct buy links
-- **Save & Track** — Save items, track viewed products, and log purchases
-- **Responsive Design** — Mobile-first UI optimized for touch interactions
+- **Conversational AI Search** -- Ask about any product in natural language; Claude extracts intent and fetches real products from Google Shopping via SerpAPI
+- **Personalized Recommendations** -- Onboarding captures gender, age, skin type, hair type, interests, and budget; Sonnet ranks real products for you
+- **Smart Home Feed** -- Deals, trending searches, popular purchases, and "because you searched" sections driven by Haiku-generated queries
+- **Real Product Data** -- Prices, ratings, reviews, retailer info, and direct buy links from Google Shopping (not mock data)
+- **Review Synthesis** -- AI-powered analysis of customer reviews: pros, cons, red flags, and claim verification
+- **Multi-User Auth & Sync** -- Email/password accounts stored in D1, with push/pull sync across devices
+- **Multi-Thread Chat** -- Multiple conversation threads with independent history
+- **Product Comparison** -- Side-by-side comparison of up to 3 products
+- **Save & Track** -- Save items, track viewed products, log purchases
+- **Mobile-First PWA** -- Responsive design optimized for touch interactions
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
-│                  │     │  Cloudflare Worker   │     │                  │
-│  GitHub Pages    │────▶│    (proxy)           │────▶│  Anthropic API   │
-│  (index.html)    │◀────│                      │◀────│  (Claude + Web   │
-│                  │     │  API key stored here  │     │   Search)        │
-└──────────────────┘     └─────────────────────┘     └──────────────────┘
-     Browser                  Serverless                  AI Backend
+Browser (GitHub Pages)          Cloudflare Worker              External APIs
+┌─────────────────────┐    ┌──────────────────────────┐    ┌──────────────────┐
+│                     │    │  worker.js               │    │  Anthropic API   │
+│  React SPA          │───>│                          │───>│  (Claude Haiku   │
+│  (src/App.tsx)      │<───│  - Anthropic proxy       │<───│   + Sonnet)      │
+│                     │    │  - SerpAPI proxy          │    │                  │
+│  Vite + TypeScript  │    │  - Auth (email/password)  │    ├──────────────────┤
+│  Inline styles      │    │  - Sync (push/pull)       │    │  SerpAPI         │
+│                     │    │  - Image cache (KV)       │    │  (Google         │
+│  sync.ts            │    │  - D1 (SQLite)            │    │   Shopping)      │
+└─────────────────────┘    └──────────────────────────┘    └──────────────────┘
 ```
 
-The API key **never touches the browser**. The Cloudflare Worker acts as a secure proxy with:
-- CORS origin validation
+API keys **never touch the browser**. The Cloudflare Worker acts as a secure proxy with:
+- CORS origin validation (whitelist of allowed origins)
 - Rate limiting (30 req/min per IP)
-- Model & token allowlisting
 - Request validation
 
 ---
 
-## Deployment Guide
+## Tiered Processing Pipeline
 
-### Step 1: Deploy the Cloudflare Worker (API proxy)
+Every user query flows through this cost-optimized pipeline:
 
-This takes ~5 minutes. The free tier handles 100K requests/day.
+| Tier | Stage | Model/Source | Cost | Purpose |
+|------|-------|-------------|------|---------|
+| T0 | Cache | In-memory `searchCache` per thread | Free | Avoid duplicate searches |
+| T1 | Local Filter | (Planned) Filter existing products | Free | Handle refinements without API calls |
+| T2 | Intent | Haiku, 256 tokens | ~$0.001 | Classify shopping vs general query |
+| T3 | Product DB | SerpAPI Google Shopping + D1 cache | Free if cached | Fetch real product data |
+| T4 | Personalize | Sonnet, 1024 tokens | ~$0.01 | Rank and annotate real products |
+| T5 | Conversational | Haiku, 512 tokens | ~$0.001 | Answer non-shopping questions |
+| T6 | No fallback | -- | -- | Show "no results" + retailer links |
+| T7 | Review Synthesis | Haiku, 500 tokens | ~$0.001 | On-demand review analysis (cached) |
 
-```bash
-# 1. Install Wrangler CLI
-npm install -g wrangler
-
-# 2. Login to Cloudflare (creates free account if needed)
-wrangler login
-
-# 3. Create a new directory for the worker
-mkdir smartshop-proxy && cd smartshop-proxy
-
-# 4. Copy the worker files from this repo
-cp ../worker.js ./src/index.js
-cp ../wrangler.toml ./wrangler.toml
-
-# 5. Set your Anthropic API key as a secret (never committed to code)
-wrangler secret put ANTHROPIC_API_KEY
-# → Paste your sk-ant-... key when prompted
-
-# 6. Deploy
-wrangler deploy
-# → Outputs: https://smartshop-proxy.<your-subdomain>.workers.dev
-```
-
-Save the worker URL — you'll need it in Step 3.
-
-### Step 2: Deploy the Frontend (GitHub Pages)
-
-```bash
-# Already done if you're reading this from the repo!
-# Go to: Settings → Pages → Source: Deploy from branch → main → / (root) → Save
-```
-
-Your app will be live at `https://<username>.github.io/smartshop-ai/`
-
-### Step 3: Connect the App to Your Worker
-
-1. Open the deployed app
-2. Complete the onboarding flow (name, preferences)
-3. Go to **Settings** (gear icon in bottom nav)
-4. Find **AI Configuration** card
-5. Paste your Cloudflare Worker URL (e.g., `https://smartshop-proxy.your-subdomain.workers.dev`)
-6. Click **Connect**
-
-That's it! The AI search is now fully functional.
+**Typical shopping query cost: ~$0.011** (intent + SerpAPI + personalization)
 
 ---
 
@@ -94,73 +67,157 @@ That's it! The AI search is now fully functional.
 
 ```
 smartshop-ai/
-├── index.html          # Complete app (React + JSX, runs via Babel standalone)
-├── smartshop-app.tsx    # Original source (for reference / IDE use)
-├── worker.js           # Cloudflare Worker proxy
-├── wrangler.toml       # Worker deployment config
-└── README.md           # This file
-```
-
-### Why a single index.html?
-
-GitHub Pages serves static files. Instead of a build step, the app loads React and Babel from CDN and compiles JSX in-browser. This means:
-- **Zero build tooling** — no Node.js, no bundler, no CI/CD needed
-- **Edit and push** — changes go live immediately
-- **Works anywhere** — download and open locally, or deploy to any static host
-
-For production at scale, you'd migrate to Vite/Next.js with proper bundling.
-
----
-
-## Security
-
-| Concern | Mitigation |
-|---|---|
-| API key exposure | Stored as Cloudflare secret, never in browser |
-| Unauthorized usage | CORS origin whitelist + rate limiting |
-| Prompt injection | System prompt is server-controlled |
-| Model abuse | Allowlisted models & capped tokens |
-| Data privacy | No user data stored server-side; all state is in-browser |
-
----
-
-## Configuration
-
-### Cloudflare Worker (`worker.js`)
-
-| Setting | Default | Description |
-|---|---|---|
-| `ALLOWED_ORIGINS` | `sumeerp.github.io`, `localhost:*` | Domains allowed to call the proxy |
-| `RATE_LIMIT` | 30 | Max requests per minute per IP |
-| `allowedModels` | `claude-sonnet-4, claude-haiku-4.5` | Models the frontend can request |
-| `max_tokens` cap | 4096 | Maximum tokens per response |
-
-### Frontend (`index.html`)
-
-The proxy URL is stored in `localStorage` under `__smartshop_proxy`. Users configure it in Settings → AI Configuration.
-
----
-
-## Local Development
-
-```bash
-# Serve locally with any static server
-npx serve .
-# or
-python3 -m http.server 8000
-
-# Open http://localhost:8000 (or 3000/5173/5500 — all whitelisted in the worker)
+├── src/
+│   ├── App.tsx           # Main app (~1200 lines -- UI + AI pipeline + state)
+│   ├── sync.ts           # Auth + cloud sync client (push/pull, session tokens)
+│   ├── main.tsx          # React entry point
+│   └── index.css         # Minimal base styles
+├── worker.js             # Cloudflare Worker (~1055 lines -- proxy + SerpAPI + auth + sync + image)
+├── wrangler.toml         # Worker config (KV namespace, D1 database bindings)
+├── schema.sql            # D1 schema (users, products, threads, caches)
+├── schema-phase3.sql     # D1 migration (search_cache, product_details_cache, api_usage)
+├── vite.config.ts        # Vite build config (base: /smartshop-ai/)
+├── package.json          # Dependencies (React 18, Vite 5, TypeScript 5)
+├── index.html            # HTML entry (Vite SPA)
+├── CLAUDE.md             # Architecture doc for Claude Code
+└── .antigravity/
+    └── rules.md          # Agent rules
 ```
 
 ---
 
 ## Tech Stack
 
-- **Frontend**: React 18, Babel Standalone (in-browser JSX)
-- **AI**: Claude Sonnet 4 via Anthropic Messages API + Web Search tool
-- **Proxy**: Cloudflare Workers (serverless, free tier)
-- **Hosting**: GitHub Pages (static, free)
-- **Styling**: Inline CSS-in-JS (zero dependencies)
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 18, TypeScript, Vite 5 (inline styles, no Tailwind) |
+| AI | Claude Haiku (intent, conversational, reviews) + Claude Sonnet (personalization) |
+| Product Data | SerpAPI Google Shopping (8 calls/day free tier) |
+| Caching | D1 (24h search cache, 7d detail cache) + KV (image cache) + in-memory |
+| Auth | Custom email/password, PBKDF2 hashing, session tokens in D1 |
+| Backend | Cloudflare Workers (serverless) |
+| Database | Cloudflare D1 (SQLite) |
+| Hosting | GitHub Pages (frontend), Cloudflare Workers (backend) |
+| Deployment | `npm run deploy` (gh-pages), `wrangler deploy` (worker) |
+
+---
+
+## Setup & Development
+
+### Prerequisites
+
+- Node.js 18+
+- Wrangler CLI (`npm install -g wrangler`)
+- Cloudflare account (free tier)
+- Anthropic API key
+- SerpAPI key (free tier: 100 searches/month)
+
+### Local Development
+
+```bash
+# Install frontend dependencies
+npm install
+
+# Start Vite dev server (port 5173)
+npm run dev
+
+# In another terminal, start the worker locally (port 8787)
+wrangler dev
+
+# The app auto-detects localhost and routes to http://localhost:8787
+```
+
+### Deploy the Worker
+
+```bash
+# Login to Cloudflare
+wrangler login
+
+# Set secrets (never committed to code)
+wrangler secret put ANTHROPIC_API_KEY
+wrangler secret put SERPAPI_KEY
+
+# Create D1 database (first time)
+wrangler d1 create smartshop-users
+wrangler d1 execute smartshop-users --file=schema.sql
+
+# Deploy
+wrangler deploy
+```
+
+### Deploy the Frontend
+
+```bash
+# Build and deploy to GitHub Pages
+npm run deploy
+# This runs: vite build && gh-pages -d dist
+```
+
+---
+
+## Configuration
+
+### Worker Secrets (Cloudflare)
+
+| Secret | Description |
+|--------|------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (sk-ant-...) |
+| `SERPAPI_KEY` | SerpAPI key for Google Shopping |
+
+### Worker Settings (`wrangler.toml`)
+
+| Binding | Type | Purpose |
+|---------|------|---------|
+| `IMAGE_CACHE` | KV Namespace | Cached product image URLs (7d TTL) |
+| `DB` | D1 Database | Users, products, threads, search cache |
+
+### Frontend Config (`src/App.tsx`)
+
+| Function | Behavior |
+|----------|----------|
+| `getProxyUrl()` | Always returns production worker URL (for AI calls) |
+| `getWorkerUrl()` | Returns `localhost:8787` in dev, production URL otherwise |
+
+---
+
+## Security
+
+| Concern | Mitigation |
+|---------|-----------|
+| API key exposure | Stored as Cloudflare secrets, never in browser code |
+| Unauthorized usage | CORS origin whitelist + IP rate limiting (30/min) |
+| Prompt injection | Security disclaimers in every system prompt |
+| Password storage | PBKDF2 with random salt, never plaintext |
+| Image validation | `isValidImageUrl()` domain whitelist in worker.js |
+| SerpAPI abuse | Daily usage tracking in D1 (8 calls/day limit) |
+
+---
+
+## D1 Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `users` | Email, password hash/salt, profile, session token |
+| `saved_products` | User's saved/favorited products |
+| `purchases` | Purchase history |
+| `search_history` | Search query log |
+| `threads` | Chat thread metadata |
+| `thread_data` | Chat message data (JSON blob per thread) |
+| `viewed_products` | Recently viewed products |
+| `search_cache` | SerpAPI search results (24h TTL) |
+| `product_details_cache` | SerpAPI product details (7d TTL) |
+| `api_usage` | Daily SerpAPI call counter |
+
+---
+
+## Planned Improvements
+
+- T1 local filter: re-rank existing products for refinement queries without new API calls
+- Component decomposition: break App.tsx into smaller modules
+- Tailwind CSS migration (replace inline styles)
+- Zod schema validation for API responses
+- Test framework (Vitest)
+- PWA offline support with service worker
 
 ---
 
