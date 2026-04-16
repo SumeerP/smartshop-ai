@@ -4,7 +4,7 @@ This file provides context for Claude Code when working on this codebase.
 
 ## Project Overview
 
-SmartShop AI is a conversational shopping assistant that uses real product data from Google Shopping (via SerpAPI) and Claude AI for intent classification, personalization, and review synthesis. It runs as a React SPA on GitHub Pages with a Cloudflare Worker backend.
+SmartShop AI is a conversational shopping assistant that uses real product data from Amazon and Google Shopping (via ScrapingDog, with SerpAPI legacy fallback) and Claude AI for intent classification, personalization, comparison charts, and review synthesis. It runs as a React SPA on GitHub Pages with a Cloudflare Worker backend.
 
 ## File Layout
 
@@ -43,11 +43,12 @@ Every user query flows through this pipeline in App.tsx:
 1. **T0 -- Cache check**: In-memory `searchCache` (Map) per chat thread. If we already searched this query, skip API calls.
 2. **T1 -- Local filter**: Filter/re-rank existing products for refinement queries like "cheaper", "under $50", "sort by rating". Skips LLM entirely.
 3. **T2 -- Intent extraction**: Haiku, 256 tokens. Classifies query as `shopping` or `general`, extracts search keywords. Function: `buildIntentPrompt()` + `parseIntent()`.
-4. **T3 -- Product fetch**: SerpAPI Google Shopping via worker endpoint `/api/search-products`. D1 cache with 24h TTL. Falls back to stale cache if daily quota (8 calls) exhausted.
-5. **T4 -- Personalization**: Sonnet, 1024 tokens. Takes real products + user profile, selects 2-5 best matches with personalized reasons. Function: `buildRecommendPrompt()` + `mergeRealProducts()`.
-6. **T5 -- Conversational**: Haiku, 512 tokens. For non-shopping queries only. Function: `buildConversationalPrompt()` + `parseConversational()`.
-7. **T6 -- No fallback**: If SerpAPI returns zero products, show "no results" with links to major retailers. Never fabricate products.
-8. **T7 -- Review synthesis**: Haiku, 500 tokens. On-demand when user taps "AI Analysis" on a product. Function: `buildReviewSynthesisPrompt()` + `parseReviewSynthesis()`. Results are cached client-side.
+4. **T3 -- Product fetch**: ScrapingDog Amazon + Google Shopping (parallel) via worker `/api/search-products`. D1 cache with 24h TTL. Falls back to stale cache if daily quota exhausted. Feature-flagged: `SEARCH_PROVIDER=scrapingdog|serpapi`.
+5. **T3.5 -- Comparison chart**: Haiku, 600 tokens. When ≥3 products found, generates inline comparison table with profileMatchScore, verdicts, and key differentiators. Runs in parallel with personalization. Function: `buildComparisonPrompt()` + `parseComparisonData()`.
+6. **T4 -- Personalization**: Sonnet, 1024 tokens. Takes real products + user profile, selects 2-5 best matches with personalized reasons. Function: `buildRecommendPrompt()` + `mergeRealProducts()`.
+7. **T5 -- Conversational**: Haiku, 512 tokens. For non-shopping queries only. Function: `buildConversationalPrompt()` + `parseConversational()`.
+8. **T6 -- No fallback**: If search returns zero products, show "no results" with links to major retailers. Never fabricate products.
+9. **T7 -- Review synthesis**: Haiku, 500 tokens. On-demand when user taps "AI Analysis" on a product. Function: `buildReviewSynthesisPrompt()` + `parseReviewSynthesis()`. Results are cached client-side.
 
 ### LLM Calls Summary
 
@@ -55,6 +56,7 @@ Every user query flows through this pipeline in App.tsx:
 |------|-------|------|-----------|
 | Intent extraction | Haiku | Every query | 256 |
 | Conversational | Haiku | General (non-shopping) queries only | 512 |
+| Comparison chart | Haiku | Shopping queries with ≥3 products (parallel with Sonnet) | 600 |
 | Personalization | Sonnet | Shopping queries with products | 1024 |
 | Home feed queries | Haiku | Periodic, generates trending queries | Variable |
 | Review synthesis | Haiku | On-demand, user opens reviews | 500 |
@@ -69,9 +71,9 @@ All LLM calls go through `callAI()` in App.tsx, which POSTs to `getProxyUrl()` (
 | POST | `/` | Anthropic API proxy (AI calls) |
 | GET | `/product-image?asin=` | Fetch Amazon product image by ASIN |
 | GET | `/search-image?q=` | Search for product image |
-| GET | `/api/search-products?q=&num=` | SerpAPI Google Shopping search (cached in D1) |
-| GET | `/api/product-details?product_id=` | SerpAPI product details + reviews (cached in D1) |
-| GET | `/api/search-quota` | Today's SerpAPI usage vs daily limit |
+| GET | `/api/search-products?q=&num=` | Product search — ScrapingDog Amazon+Google Shopping (cached in D1) |
+| GET | `/api/product-details?product_id=&asin=` | Product details + reviews (ScrapingDog Amazon or SerpAPI, cached in D1) |
+| GET | `/api/search-quota` | API usage vs limits (daily + monthly for ScrapingDog) |
 | POST | `/api/auth/register` | Create account (email + password) |
 | POST | `/api/auth/login` | Login (returns session token) |
 | POST | `/api/auth/logout` | Invalidate session token |
@@ -85,9 +87,10 @@ All LLM calls go through `callAI()` in App.tsx, which POSTs to `getProxyUrl()` (
 ```
 User query
   -> Haiku intent extraction (keywords + intent)
-  -> SerpAPI Google Shopping (via worker, D1 cached)
+  -> ScrapingDog Amazon + Google Shopping (parallel, via worker, D1 cached)
+  -> Haiku comparison chart (parallel with Sonnet, if ≥3 products)
   -> Sonnet personalization (rank + annotate real products)
-  -> Display with real prices, ratings, buy links
+  -> Display with real prices, ratings, buy links, inline comparison table
 ```
 
 ### Auth Flow
@@ -118,7 +121,11 @@ Both are defined at the top of `src/App.tsx`. The sync client (`src/sync.ts`) ha
 
 Secrets are set via `wrangler secret put` and never appear in code:
 - `ANTHROPIC_API_KEY` -- Anthropic API key
-- `SERPAPI_KEY` -- SerpAPI key for Google Shopping
+- `SCRAPINGDOG_KEY` -- ScrapingDog API key (primary, 1000 free credits/month)
+- `SERPAPI_KEY` -- SerpAPI key (legacy fallback, 8 calls/day)
+
+Optional env vars (set via `wrangler.toml` or `wrangler secret put`):
+- `SEARCH_PROVIDER` -- `scrapingdog` (default) or `serpapi` for migration
 
 Local development uses `.dev.vars` (gitignored) for secrets.
 
@@ -128,9 +135,9 @@ Database name: `smartshop-users`. Key tables:
 - `users` -- email, password_hash, password_salt, profile fields, session_token
 - `saved_products`, `purchases`, `viewed_products` -- user product data
 - `threads`, `thread_data` -- chat history
-- `search_cache` -- SerpAPI results (24h TTL, keyed by SHA-256 of query)
+- `search_cache` -- Product search results (24h TTL, keyed by SHA-256 of query)
 - `product_details_cache` -- product details (7d TTL)
-- `api_usage` -- daily SerpAPI call counter (limit: 8/day on free tier)
+- `api_usage` -- daily API call counter (tracks `scrapingdog` or `serpapi` provider)
 
 ## Image Handling
 
@@ -181,6 +188,6 @@ wrangler d1 execute smartshop-users --file=schema-phase3.sql
 - No test coverage
 - No input validation library (Zod planned)
 - No Tailwind (inline styles only)
-- SerpAPI free tier: 8 calls/day (250/month)
+- ScrapingDog free tier: 1000 credits/month (~33/day). Each search = 2 credits (Amazon + Google Shopping parallel). Legacy SerpAPI: 8 calls/day
 - T1 local filter handles basic keywords ("cheaper", "under $N", "sort by rating") but not natural language refinements
 - No service worker for offline PWA support

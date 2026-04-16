@@ -36,7 +36,7 @@ Supporting files: `src/sync.ts` (auth/sync client), `schema.sql` (D1 schema), `w
 ### This is NOT Express
 - The backend is a Cloudflare Worker (`worker.js`), not an Express app
 - It uses the Workers `fetch` event handler pattern, not `app.get()`/`app.post()`
-- Environment bindings (DB, IMAGE_CACHE, ANTHROPIC_API_KEY, SERPAPI_KEY) come from the `env` parameter, not `process.env`
+- Environment bindings (DB, IMAGE_CACHE, ANTHROPIC_API_KEY, SCRAPINGDOG_KEY, SERPAPI_KEY) come from the `env` parameter, not `process.env`
 - There is no `node_modules` on the worker side -- only Web APIs
 
 ### This is NOT Supabase
@@ -79,14 +79,16 @@ Supporting files: `src/sync.ts` (auth/sync client), `schema.sql` (D1 schema), `w
 
 ### URL routing
 - `getProxyUrl()` -- for AI (Anthropic) calls, always production worker
-- `getWorkerUrl()` -- for SerpAPI/auth/sync calls, localhost in dev
+- `getWorkerUrl()` -- for product search/auth/sync calls, localhost in dev
 - `getBase()` in sync.ts -- same logic as getWorkerUrl() for sync endpoints
 
 ## Cost Awareness
 
-- Haiku calls are cheap (~$0.001): use for intent, conversational, reviews, home queries
+- Haiku calls are cheap (~$0.001): use for intent, conversational, reviews, comparison, home queries
 - Sonnet calls cost ~$0.01: use only for personalization (ranking real products)
-- SerpAPI free tier: 8 calls/day. Always check D1 cache first (24h TTL for searches, 7d for details)
+- ScrapingDog free tier: 1000 credits/month (~33/day). Each search = 2 credits (Amazon + Google Shopping). Product detail = 1 credit.
+- SerpAPI legacy fallback: 8 calls/day (feature-flagged via `SEARCH_PROVIDER` env var)
+- Always check D1 cache first (24h TTL for searches, 7d for details)
 - In-memory `searchCache` per thread avoids redundant API calls within a conversation
 - Never add a Sonnet call where Haiku suffices
 - Never skip cache checks

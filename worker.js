@@ -14,9 +14,9 @@
  *   PATCH /api/user/profile    — Update profile fields
  *   POST /api/sync/push        — Push local state to D1
  *   GET  /api/sync/pull        — Pull full user state from D1
- *   GET  /api/search-products  — SerpAPI Google Shopping search (cached)
- *   GET  /api/product-details  — SerpAPI product details + reviews (cached)
- *   GET  /api/search-quota     — Today's SerpAPI usage vs daily limit
+ *   GET  /api/search-products  — Product search (ScrapingDog Amazon+Google Shopping, cached)
+ *   GET  /api/product-details  — Product details + reviews (ScrapingDog/SerpAPI, cached)
+ *   GET  /api/search-quota     — API usage vs limits
  */
 
 const ALLOWED_ORIGINS = [
@@ -94,12 +94,18 @@ async function cacheImage(key, url, env) {
 }
 
 // ============================================================
-// SERPAPI — Real product data from Google Shopping
+// Product Data — ScrapingDog (primary) or SerpAPI (legacy)
 // ============================================================
 
 const SERPAPI_DAILY_LIMIT = 8; // Free tier: 250/month ≈ 8/day
+const SCRAPINGDOG_MONTHLY_LIMIT = 1000; // Free tier
+const SCRAPINGDOG_DAILY_LIMIT = 33; // ~1000/30
 const SEARCH_CACHE_TTL_HOURS = 24;
 const DETAIL_CACHE_TTL_DAYS = 7;
+
+function getSearchProvider(env) {
+  return (env.SEARCH_PROVIDER || (env.SCRAPINGDOG_KEY ? 'scrapingdog' : 'serpapi'));
+}
 
 async function sha256(text) {
   const data = new TextEncoder().encode(text.toLowerCase().trim());
@@ -107,22 +113,34 @@ async function sha256(text) {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function getApiUsage(env) {
+async function getApiUsage(env, apiName) {
   if (!env.DB) return 0;
+  const name = apiName || getSearchProvider(env);
   const dateKey = new Date().toISOString().slice(0, 10);
   const row = await env.DB.prepare(
     'SELECT call_count FROM api_usage WHERE api_name = ? AND date_key = ?'
-  ).bind('serpapi', dateKey).first();
+  ).bind(name, dateKey).first();
   return row ? row.call_count : 0;
 }
 
-async function incrementApiUsage(env) {
+async function getMonthlyApiUsage(env, apiName) {
+  if (!env.DB) return 0;
+  const name = apiName || getSearchProvider(env);
+  const monthPrefix = new Date().toISOString().slice(0, 7); // "2026-04"
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(call_count), 0) as total FROM api_usage WHERE api_name = ? AND date_key LIKE ?`
+  ).bind(name, monthPrefix + '%').first();
+  return row ? row.total : 0;
+}
+
+async function incrementApiUsage(env, apiName) {
   if (!env.DB) return;
+  const name = apiName || getSearchProvider(env);
   const dateKey = new Date().toISOString().slice(0, 10);
   await env.DB.prepare(
-    `INSERT INTO api_usage (api_name, date_key, call_count) VALUES ('serpapi', ?, 1)
+    `INSERT INTO api_usage (api_name, date_key, call_count) VALUES (?, ?, 1)
      ON CONFLICT(api_name, date_key) DO UPDATE SET call_count = call_count + 1`
-  ).bind(dateKey).run();
+  ).bind(name, dateKey).run();
 }
 
 // Image URL validation
@@ -164,6 +182,7 @@ function mapSerpProduct(item, index) {
     dealPct,
     why: '',
     serpapi_product_id: item.product_id || '',
+    source_api: 'serpapi_google',
     delivery: item.delivery || '',
     extensions: item.extensions || [],
     tag: item.tag || '',
@@ -173,8 +192,72 @@ function mapSerpProduct(item, index) {
   };
 }
 
+// --- ScrapingDog product mappers ---
+
+function mapAmazonProduct(item, index) {
+  const priceStr = typeof item.price === 'string' ? item.price : String(item.price || '');
+  const price = parseFloat(priceStr.replace(/[^0-9.]/g, '')) || null;
+  const thumbnail = item.image || item.thumbnail || '';
+  return {
+    id: `amz-${Date.now()}-${index}`,
+    name: item.title || 'Unknown Product',
+    price,
+    rating: item.rating ? parseFloat(item.rating) : null,
+    reviews: item.total_reviews ? parseInt(String(item.total_reviews).replace(/[^0-9]/g, '')) : null,
+    retailer: 'Amazon',
+    cat: '',
+    img: '',
+    thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
+    url: item.link || (item.asin ? `https://www.amazon.com/dp/${item.asin}` : ''),
+    asin: item.asin || '',
+    deal: !!item.is_deal || !!item.coupon_text,
+    dealPct: item.savings_percentage ? parseInt(item.savings_percentage) : 0,
+    why: '',
+    serpapi_product_id: '',
+    source_api: 'scrapingdog_amazon',
+    delivery: item.delivery || '',
+    extensions: [],
+    tag: item.badge || item.amazon_choice || '',
+    snippet: '',
+    dataSource: 'scrapingdog',
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+function mapGoogleShoppingProduct(item, index) {
+  const price = item.extracted_price != null ? item.extracted_price : (item.price ? parseFloat(String(item.price).replace(/[^0-9.]/g, '')) : null);
+  const oldPrice = item.old_price ? parseFloat(String(item.old_price).replace(/[^0-9.]/g, '')) : null;
+  const hasDeal = oldPrice != null && price != null && oldPrice > price;
+  const dealPct = hasDeal ? Math.round((1 - price / oldPrice) * 100) : 0;
+  const thumbnail = item.thumbnail || '';
+  return {
+    id: `gshop-${Date.now()}-${index}`,
+    name: item.title || 'Unknown Product',
+    price,
+    rating: item.rating || null,
+    reviews: item.reviews || null,
+    retailer: item.source || 'Online',
+    cat: '',
+    img: '',
+    thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
+    url: item.link || item.product_link || '',
+    asin: '',
+    deal: hasDeal,
+    dealPct,
+    why: '',
+    serpapi_product_id: item.product_id || '',
+    source_api: 'scrapingdog_google',
+    delivery: item.delivery || '',
+    extensions: item.extensions || [],
+    tag: '',
+    snippet: item.snippet || '',
+    dataSource: 'scrapingdog',
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 /**
- * GET /api/search-products?q=...&num=5 — SerpAPI Google Shopping search
+ * GET /api/search-products?q=...&num=5 — Product search (ScrapingDog or SerpAPI)
  */
 async function handleSearchProducts(request, env, corsHeaders) {
   const url = new URL(request.url);
@@ -183,7 +266,9 @@ async function handleSearchProducts(request, env, corsHeaders) {
 
   if (!query) return json({ error: 'Missing query parameter q' }, 400, corsHeaders);
 
+  const provider = getSearchProvider(env);
   const queryHash = await sha256(query);
+  const dailyLimit = provider === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
 
   // Check D1 cache (24h TTL)
   if (env.DB) {
@@ -194,14 +279,14 @@ async function handleSearchProducts(request, env, corsHeaders) {
       if (cached) {
         const products = JSON.parse(cached.results_json);
         const usage = await getApiUsage(env);
-        return json({ products: products.slice(0, num), source: 'cache', quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+        return json({ products: products.slice(0, num), source: 'cache', provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
       }
     } catch {}
   }
 
   // Check daily quota
   const usage = await getApiUsage(env);
-  if (usage >= SERPAPI_DAILY_LIMIT) {
+  if (usage >= dailyLimit) {
     // Try returning stale cache (beyond TTL)
     if (env.DB) {
       try {
@@ -210,14 +295,83 @@ async function handleSearchProducts(request, env, corsHeaders) {
         ).bind(queryHash).first();
         if (stale) {
           const products = JSON.parse(stale.results_json);
-          return json({ products: products.slice(0, num), source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true, quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+          return json({ products: products.slice(0, num), source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true, provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
         }
       } catch {}
     }
-    return json({ products: [], quota_exhausted: true, quota: { used: usage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+    return json({ products: [], quota_exhausted: true, provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
   }
 
-  // Call SerpAPI
+  // Route to appropriate provider
+  if (provider === 'scrapingdog') {
+    return handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit, env, corsHeaders);
+  }
+  return handleSerpApiSearch(query, num, queryHash, usage, dailyLimit, env, corsHeaders);
+}
+
+// --- ScrapingDog: Parallel Amazon + Google Shopping search ---
+async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit, env, corsHeaders) {
+  const sdKey = env.SCRAPINGDOG_KEY;
+  if (!sdKey) return json({ error: 'ScrapingDog key not configured' }, 500, corsHeaders);
+
+  try {
+    // Parallel fetch: Amazon + Google Shopping
+    const [amzRes, gshopRes] = await Promise.allSettled([
+      fetch(`https://api.scrapingdog.com/amazon/search?api_key=${sdKey}&query=${encodeURIComponent(query)}&domain=com`),
+      fetch(`https://api.scrapingdog.com/google_shopping?api_key=${sdKey}&query=${encodeURIComponent(query)}`),
+    ]);
+
+    const products = [];
+    const seen = new Set();
+    let creditsUsed = 0;
+
+    // Process Amazon results
+    if (amzRes.status === 'fulfilled' && amzRes.value.ok) {
+      creditsUsed++;
+      const amzData = await amzRes.value.json();
+      const items = Array.isArray(amzData) ? amzData : (amzData.results || amzData.products || []);
+      for (const [i, item] of items.slice(0, 5).entries()) {
+        const p = mapAmazonProduct(item, i);
+        const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
+        if (key && !seen.has(key)) { seen.add(key); products.push(p); }
+      }
+    }
+
+    // Process Google Shopping results
+    if (gshopRes.status === 'fulfilled' && gshopRes.value.ok) {
+      creditsUsed++;
+      const gshopData = await gshopRes.value.json();
+      const items = gshopData.shopping_results || gshopData.results || [];
+      for (const [i, item] of items.slice(0, 5).entries()) {
+        const p = mapGoogleShoppingProduct(item, i);
+        const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
+        if (key && !seen.has(key)) { seen.add(key); products.push(p); }
+      }
+    }
+
+    // Track credits used (one per source that responded)
+    for (let i = 0; i < creditsUsed; i++) {
+      await incrementApiUsage(env);
+    }
+    const newUsage = usage + creditsUsed;
+
+    // Cache in D1
+    if (env.DB && products.length > 0) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO search_cache (query_hash, query_text, results_json, result_count) VALUES (?, ?, ?, ?)'
+        ).bind(queryHash, query, JSON.stringify(products), products.length).run();
+      } catch {}
+    }
+
+    return json({ products: products.slice(0, num), source: 'scrapingdog', provider: 'scrapingdog', quota: { used: newUsage, limit: dailyLimit } }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'ScrapingDog error: ' + err.message }, 502, corsHeaders);
+  }
+}
+
+// --- SerpAPI: Legacy Google Shopping search ---
+async function handleSerpApiSearch(query, num, queryHash, usage, dailyLimit, env, corsHeaders) {
   const serpApiKey = env.SERPAPI_KEY;
   if (!serpApiKey) return json({ error: 'SerpAPI key not configured' }, 500, corsHeaders);
 
@@ -240,31 +394,36 @@ async function handleSearchProducts(request, env, corsHeaders) {
       } catch {}
     }
 
-    // Increment usage
     await incrementApiUsage(env);
     const newUsage = usage + 1;
 
-    return json({ products, source: 'serpapi', quota: { used: newUsage, limit: SERPAPI_DAILY_LIMIT } }, 200, corsHeaders);
+    return json({ products, source: 'serpapi', provider: 'serpapi', quota: { used: newUsage, limit: dailyLimit } }, 200, corsHeaders);
   } catch (err) {
     return json({ error: 'SerpAPI error: ' + err.message }, 502, corsHeaders);
   }
 }
 
 /**
- * GET /api/product-details?product_id=... — SerpAPI product details + reviews
+ * GET /api/product-details?product_id=...&asin=... — Product details + reviews
+ * Uses ScrapingDog Amazon Product API if ASIN provided, else SerpAPI product detail
  */
 async function handleProductDetails(request, env, corsHeaders) {
   const url = new URL(request.url);
   const productId = url.searchParams.get('product_id');
+  const asin = url.searchParams.get('asin');
+  const cacheKey = asin || productId;
 
-  if (!productId) return json({ error: 'Missing product_id parameter' }, 400, corsHeaders);
+  if (!cacheKey) return json({ error: 'Missing product_id or asin parameter' }, 400, corsHeaders);
+
+  const provider = getSearchProvider(env);
+  const dailyLimit = provider === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
 
   // Check D1 cache (7-day TTL)
   if (env.DB) {
     try {
       const cached = await env.DB.prepare(
         `SELECT details_json FROM product_details_cache WHERE product_id = ? AND created_at > datetime('now', '-${DETAIL_CACHE_TTL_DAYS} days')`
-      ).bind(productId).first();
+      ).bind(cacheKey).first();
       if (cached) {
         const data = JSON.parse(cached.details_json);
         return json({ ...data, source: 'cache' }, 200, corsHeaders);
@@ -274,13 +433,13 @@ async function handleProductDetails(request, env, corsHeaders) {
 
   // Check quota
   const usage = await getApiUsage(env);
-  if (usage >= SERPAPI_DAILY_LIMIT) {
+  if (usage >= dailyLimit) {
     // Try stale cache
     if (env.DB) {
       try {
         const stale = await env.DB.prepare(
           'SELECT details_json, created_at FROM product_details_cache WHERE product_id = ?'
-        ).bind(productId).first();
+        ).bind(cacheKey).first();
         if (stale) {
           const data = JSON.parse(stale.details_json);
           return json({ ...data, source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true }, 200, corsHeaders);
@@ -290,7 +449,90 @@ async function handleProductDetails(request, env, corsHeaders) {
     return json({ details: null, reviews: [], quota_exhausted: true }, 200, corsHeaders);
   }
 
-  // Call SerpAPI Google Product API
+  // Route: ScrapingDog Amazon Product if ASIN available and provider is scrapingdog
+  if (asin && provider === 'scrapingdog' && env.SCRAPINGDOG_KEY) {
+    return handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders);
+  }
+
+  // Route: SerpAPI Google Product (legacy or non-Amazon products)
+  if (productId) {
+    return handleSerpApiProductDetail(productId, cacheKey, env, corsHeaders);
+  }
+
+  return json({ details: null, reviews: [], error: 'No detail endpoint available for this product' }, 200, corsHeaders);
+}
+
+// --- ScrapingDog: Amazon product detail ---
+async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) {
+  const sdKey = env.SCRAPINGDOG_KEY;
+  try {
+    const sdUrl = `https://api.scrapingdog.com/amazon/product?api_key=${sdKey}&asin=${asin}&domain=com`;
+    const res = await fetch(sdUrl);
+    if (!res.ok) {
+      return json({ details: null, reviews: [], error: 'ScrapingDog product request failed' }, 200, corsHeaders);
+    }
+    const data = await res.json();
+
+    const details = {
+      description: data.description || '',
+      highlights: (data.feature_bullets || data.about_item || []).slice(0, 8),
+      features: (data.feature_bullets || []).slice(0, 5),
+      specs: {},
+      media: [],
+      typicalPrices: null,
+    };
+
+    // Extract specs from product_information or specifications
+    const specSource = data.product_information || data.specifications || {};
+    if (typeof specSource === 'object' && !Array.isArray(specSource)) {
+      Object.assign(details.specs, specSource);
+    } else if (Array.isArray(specSource)) {
+      for (const group of specSource) {
+        for (const item of (group.items || [])) {
+          if (item.title && item.value) details.specs[item.title] = item.value;
+        }
+      }
+    }
+
+    // Extract media images (validated)
+    const images = data.images || data.product_images || [];
+    details.media = images.slice(0, 6).map(img => ({
+      link: typeof img === 'string' ? img : (img.link || img.url || ''),
+      type: 'image',
+    })).filter(m => m.link);
+
+    // Extract reviews
+    const reviewsData = data.reviews || data.customer_reviews || [];
+    const reviews = (Array.isArray(reviewsData) ? reviewsData : []).slice(0, 8).map(r => ({
+      name: r.author || r.reviewer_name || 'Amazon Customer',
+      rating: r.rating != null ? parseFloat(r.rating) : null,
+      date: r.date || '',
+      title: r.title || '',
+      body: r.body || r.review || r.content || '',
+      verified: !!r.verified_purchase,
+      dataSource: 'scrapingdog_amazon',
+    }));
+
+    const result = { details, reviews, sellers: [], ratingsHistogram: [], topicFilters: [] };
+
+    // Cache
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO product_details_cache (product_id, details_json) VALUES (?, ?)'
+        ).bind(cacheKey, JSON.stringify(result)).run();
+      } catch {}
+    }
+    await incrementApiUsage(env);
+
+    return json({ ...result, source: 'scrapingdog' }, 200, corsHeaders);
+  } catch (err) {
+    return json({ details: null, reviews: [], error: 'ScrapingDog error: ' + err.message }, 200, corsHeaders);
+  }
+}
+
+// --- SerpAPI: Google Product detail (legacy) ---
+async function handleSerpApiProductDetail(productId, cacheKey, env, corsHeaders) {
   const serpApiKey = env.SERPAPI_KEY;
   if (!serpApiKey) return json({ error: 'SerpAPI key not configured' }, 500, corsHeaders);
 
@@ -312,17 +554,13 @@ async function handleProductDetails(request, env, corsHeaders) {
       media: [],
       typicalPrices: serpData.typical_prices || null,
     };
-    // Extract specs from specifications
     if (serpData.specifications) {
       for (const group of serpData.specifications) {
         for (const item of (group.items || [])) {
-          if (item.title && item.value) {
-            details.specs[item.title] = item.value;
-          }
+          if (item.title && item.value) details.specs[item.title] = item.value;
         }
       }
     }
-    // Extract media images (validated)
     if (pr.media) {
       details.media = pr.media.slice(0, 6).map(m => ({
         link: m.link || '',
@@ -330,7 +568,6 @@ async function handleProductDetails(request, env, corsHeaders) {
       })).filter(m => m.link);
     }
 
-    // Extract reviews (enhanced with histogram & topics)
     const reviewsData = serpData.reviews_results?.reviews || [];
     const reviews = reviewsData.slice(0, 8).map(r => ({
       name: r.source || r.author || 'Reviewer',
@@ -344,7 +581,6 @@ async function handleProductDetails(request, env, corsHeaders) {
     const ratingsHistogram = serpData.reviews_results?.ratings || [];
     const topicFilters = (serpData.reviews_results?.filters?.topic || []).slice(0, 8);
 
-    // Extract sellers (enhanced)
     const sellersData = serpData.sellers_results?.online_sellers || [];
     const sellers = sellersData.slice(0, 5).map(s => ({
       name: s.name || '',
@@ -358,12 +594,11 @@ async function handleProductDetails(request, env, corsHeaders) {
 
     const result = { details, reviews, sellers, ratingsHistogram, topicFilters, reviews_results: serpData.reviews_results };
 
-    // Cache
     if (env.DB) {
       try {
         await env.DB.prepare(
           'INSERT OR REPLACE INTO product_details_cache (product_id, details_json) VALUES (?, ?)'
-        ).bind(productId, JSON.stringify(result)).run();
+        ).bind(cacheKey, JSON.stringify(result)).run();
       } catch {}
     }
     await incrementApiUsage(env);
@@ -375,16 +610,30 @@ async function handleProductDetails(request, env, corsHeaders) {
 }
 
 /**
- * GET /api/search-quota — Today's SerpAPI usage
+ * GET /api/search-quota — API usage for current provider
  */
 async function handleSearchQuota(request, env, corsHeaders) {
-  const used = await getApiUsage(env);
-  return json({
-    used,
-    limit: SERPAPI_DAILY_LIMIT,
-    remaining: Math.max(0, SERPAPI_DAILY_LIMIT - used),
+  const provider = getSearchProvider(env);
+  const dailyUsed = await getApiUsage(env);
+  const dailyLimit = provider === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
+
+  const result = {
+    provider,
+    used: dailyUsed,
+    limit: dailyLimit,
+    remaining: Math.max(0, dailyLimit - dailyUsed),
     date: new Date().toISOString().slice(0, 10),
-  }, 200, corsHeaders);
+  };
+
+  // Add monthly tracking for ScrapingDog
+  if (provider === 'scrapingdog') {
+    const monthlyUsed = await getMonthlyApiUsage(env);
+    result.monthly_used = monthlyUsed;
+    result.monthly_limit = SCRAPINGDOG_MONTHLY_LIMIT;
+    result.monthly_remaining = Math.max(0, SCRAPINGDOG_MONTHLY_LIMIT - monthlyUsed);
+  }
+
+  return json(result, 200, corsHeaders);
 }
 
 // ============================================================
