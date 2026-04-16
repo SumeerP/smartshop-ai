@@ -637,6 +637,176 @@ async function handleSearchQuota(request, env, corsHeaders) {
 }
 
 // ============================================================
+// REDDIT INTELLIGENCE — ScrapingDog Google Search + site:reddit.com
+// ============================================================
+
+function extractSubreddit(url) {
+  const match = (url || '').match(/reddit\.com\/r\/(\w+)/);
+  return match ? `r/${match[1]}` : '';
+}
+
+/**
+ * GET /api/reddit-search?q=... — Find Reddit discussions about a product
+ */
+async function handleRedditSearch(request, env, corsHeaders) {
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q');
+  if (!query) return json({ error: 'Missing query parameter q' }, 400, corsHeaders);
+
+  const queryHash = await sha256('reddit:' + query);
+
+  // Check D1 cache (48h TTL)
+  if (env.DB) {
+    try {
+      const cached = await env.DB.prepare(
+        `SELECT results_json FROM reddit_cache WHERE query_hash = ? AND created_at > datetime('now', '-48 hours')`
+      ).bind(queryHash).first();
+      if (cached) return json(JSON.parse(cached.results_json), 200, corsHeaders);
+    } catch {}
+  }
+
+  // Check quota before calling ScrapingDog
+  const usage = await getApiUsage(env);
+  const dailyLimit = getSearchProvider(env) === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
+  if (usage >= dailyLimit) {
+    return json({ threads: [], query, error: 'quota_exhausted' }, 200, corsHeaders);
+  }
+
+  const sdKey = env.SCRAPINGDOG_KEY;
+  if (!sdKey) return json({ threads: [], query, error: 'ScrapingDog key not configured' }, 200, corsHeaders);
+
+  try {
+    const searchQuery = `site:reddit.com ${query} review OR recommendation OR "worth it"`;
+    const sdUrl = `https://api.scrapingdog.com/google?api_key=${sdKey}&query=${encodeURIComponent(searchQuery)}&results=5`;
+    const res = await fetch(sdUrl);
+    if (!res.ok) return json({ threads: [], query, error: 'ScrapingDog search failed' }, 200, corsHeaders);
+
+    const data = await res.json();
+    await incrementApiUsage(env);
+
+    const threads = (data.organic_results || [])
+      .filter(r => r.link?.includes('reddit.com'))
+      .slice(0, 5)
+      .map(r => ({
+        title: r.title || '',
+        url: r.link || '',
+        snippet: r.snippet || '',
+        subreddit: extractSubreddit(r.link),
+        date: r.date || '',
+      }));
+
+    const result = { threads, query, fetchedAt: new Date().toISOString() };
+
+    // Cache in D1
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO reddit_cache (query_hash, query_text, results_json) VALUES (?, ?, ?)'
+        ).bind(queryHash, query, JSON.stringify(result)).run();
+      } catch {}
+    }
+
+    return json(result, 200, corsHeaders);
+  } catch (err) {
+    return json({ threads: [], query, error: 'Reddit search error: ' + err.message }, 200, corsHeaders);
+  }
+}
+
+// ============================================================
+// PRICE INTELLIGENCE — Track prices over time
+// ============================================================
+
+/**
+ * POST /api/price-track — Record a price observation (fire-and-forget from client)
+ */
+async function handlePriceTrack(request, env, corsHeaders) {
+  if (!env.DB) return json({ error: 'Database not available' }, 500, corsHeaders);
+
+  try {
+    const { productKey, price, retailer, productName } = await request.json();
+    if (!productKey || price == null) return json({ error: 'Missing productKey or price' }, 400, corsHeaders);
+
+    await env.DB.prepare(
+      'INSERT INTO price_history (product_key, product_name, price, retailer) VALUES (?, ?, ?, ?)'
+    ).bind(productKey, productName || '', price, retailer || '').run();
+
+    return json({ ok: true }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Price track error: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * GET /api/price-history?product_key=... — Get price history + deal verdict
+ */
+async function handlePriceHistory(request, env, corsHeaders) {
+  if (!env.DB) return json({ error: 'Database not available' }, 500, corsHeaders);
+
+  const url = new URL(request.url);
+  const productKey = url.searchParams.get('product_key');
+  if (!productKey) return json({ error: 'Missing product_key' }, 400, corsHeaders);
+
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT price, retailer, observed_at FROM price_history WHERE product_key = ? ORDER BY observed_at DESC LIMIT 90'
+    ).bind(productKey).all();
+
+    const history = rows.results || [];
+    if (history.length === 0) {
+      return json({ history: [], verdict: null }, 200, corsHeaders);
+    }
+
+    const prices = history.map(h => h.price);
+    const currentPrice = prices[0];
+    const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+
+    let verdict, confidence;
+    if (history.length < 3) {
+      verdict = 'Insufficient data';
+      confidence = 'low';
+    } else if (currentPrice <= min * 1.05) {
+      verdict = 'Great deal';
+      confidence = 'high';
+    } else if (currentPrice <= avg * 0.9) {
+      verdict = 'Good deal';
+      confidence = 'medium';
+    } else if (currentPrice >= avg * 1.1) {
+      verdict = 'Wait for better price';
+      confidence = 'medium';
+    } else {
+      verdict = 'Fair price';
+      confidence = 'medium';
+    }
+
+    // Trend: compare recent vs older
+    let trend = 'stable';
+    if (history.length >= 5) {
+      const recent = prices.slice(0, Math.ceil(prices.length / 2));
+      const older = prices.slice(Math.ceil(prices.length / 2));
+      const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+      const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
+      if (recentAvg < olderAvg * 0.95) trend = 'dropping';
+      else if (recentAvg > olderAvg * 1.05) trend = 'rising';
+    }
+
+    return json({
+      history: history.slice(0, 30),
+      currentPrice,
+      avgPrice: Math.round(avg * 100) / 100,
+      minPrice: min,
+      maxPrice: max,
+      trend,
+      verdict: { verdict, confidence },
+      observations: history.length,
+    }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Price history error: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+// ============================================================
 // IMAGE SCRAPING
 // ============================================================
 
@@ -1288,6 +1458,18 @@ export default {
     // Route: GET /api/search-quota
     if (request.method === 'GET' && url.pathname === '/api/search-quota') {
       return handleSearchQuota(request, env, corsHeaders);
+    }
+    // Route: GET /api/reddit-search?q=...
+    if (request.method === 'GET' && url.pathname === '/api/reddit-search') {
+      return handleRedditSearch(request, env, corsHeaders);
+    }
+    // Route: POST /api/price-track
+    if (request.method === 'POST' && url.pathname === '/api/price-track') {
+      return handlePriceTrack(request, env, corsHeaders);
+    }
+    // Route: GET /api/price-history?product_key=...
+    if (request.method === 'GET' && url.pathname === '/api/price-history') {
+      return handlePriceHistory(request, env, corsHeaders);
     }
 
     // Route: POST / — Anthropic API proxy (catch-all, must be LAST)

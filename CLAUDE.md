@@ -15,6 +15,7 @@ There are two main files that contain nearly all application logic:
 - **`src/sync.ts`** (~260 lines) -- Auth client and push/pull sync logic. Exports functions used by App.tsx.
 - **`schema.sql`** -- Complete D1 database schema (10 tables).
 - **`schema-phase3.sql`** -- Migration for cache tables (search_cache, product_details_cache, api_usage).
+- **`schema-phase4.sql`** -- Migration for reddit_cache and price_history tables.
 - **`wrangler.toml`** -- Worker config with KV (`IMAGE_CACHE`) and D1 (`DB`) bindings.
 
 ## Key Architectural Decisions
@@ -74,6 +75,9 @@ All LLM calls go through `callAI()` in App.tsx, which POSTs to `getProxyUrl()` (
 | GET | `/api/search-products?q=&num=` | Product search — ScrapingDog Amazon+Google Shopping (cached in D1) |
 | GET | `/api/product-details?product_id=&asin=` | Product details + reviews (ScrapingDog Amazon or SerpAPI, cached in D1) |
 | GET | `/api/search-quota` | API usage vs limits (daily + monthly for ScrapingDog) |
+| GET | `/api/reddit-search?q=` | Reddit discussion search (ScrapingDog Google, cached in D1) |
+| POST | `/api/price-track` | Record price observation (fire-and-forget) |
+| GET | `/api/price-history?product_key=` | Price history + deal verdict |
 | POST | `/api/auth/register` | Create account (email + password) |
 | POST | `/api/auth/login` | Login (returns session token) |
 | POST | `/api/auth/logout` | Invalidate session token |
