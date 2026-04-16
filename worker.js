@@ -246,12 +246,13 @@ function mapGoogleShoppingProduct(item, index) {
     cat: '',
     img: '',
     thumbnail: isValidImageUrl(thumbnail) ? thumbnail : (thumbnail || ''),
-    url: item.product_link || item.link || item.url || '',
+    url: item.product_url || item.product_link || item.link || item.url || '',
     asin: '',
     deal: hasDeal,
     dealPct,
     why: '',
     serpapi_product_id: item.product_id || '',
+    page_token: item.page_token || '',
     source_api: 'scrapingdog_google',
     delivery: item.delivery || '',
     extensions: item.extensions || [],
@@ -417,6 +418,7 @@ async function handleProductDetails(request, env, corsHeaders) {
   const url = new URL(request.url);
   const productId = url.searchParams.get('product_id');
   const asin = url.searchParams.get('asin');
+  const pageToken = url.searchParams.get('page_token');
   const cacheKey = asin || productId;
 
   if (!cacheKey) return json({ error: 'Missing product_id or asin parameter' }, 400, corsHeaders);
@@ -462,7 +464,7 @@ async function handleProductDetails(request, env, corsHeaders) {
 
   // Route: ScrapingDog Google Product if product_id available and provider is scrapingdog
   if (productId && provider === 'scrapingdog' && env.SCRAPINGDOG_KEY) {
-    return handleScrapingDogGoogleProductDetail(productId, cacheKey, env, corsHeaders);
+    return handleScrapingDogGoogleProductDetail(productId, pageToken, cacheKey, env, corsHeaders);
   }
 
   // Route: SerpAPI Google Product (legacy fallback)
@@ -542,79 +544,100 @@ async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) 
   }
 }
 
-// --- ScrapingDog: Google Product detail ---
-async function handleScrapingDogGoogleProductDetail(productId, cacheKey, env, corsHeaders) {
+// --- ScrapingDog: Google Product detail (immersive product) ---
+async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheKey, env, corsHeaders) {
   const sdKey = env.SCRAPINGDOG_KEY;
   try {
-    const sdUrl = `https://api.scrapingdog.com/google_product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`;
-    const res = await fetch(sdUrl);
-    if (!res.ok) {
-      return json({ details: null, reviews: [], error: 'ScrapingDog Google Product request failed' }, 200, corsHeaders);
+    // ScrapingDog uses /google_immersive_product with page_token for full product details
+    let data = null;
+    const endpoints = [];
+    if (pageToken) {
+      endpoints.push(`https://api.scrapingdog.com/google_immersive_product?api_key=${sdKey}&page_token=${encodeURIComponent(pageToken)}`);
     }
-    const data = await res.json();
+    endpoints.push(`https://api.scrapingdog.com/google_shopping/product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`);
+    endpoints.push(`https://api.scrapingdog.com/google_product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`);
 
-    const pr = data.product_results || data.product || data || {};
+    for (const sdUrl of endpoints) {
+      try {
+        const res = await fetch(sdUrl);
+        if (res.ok) {
+          const parsed = await res.json();
+          // Verify it's not an error response
+          if (parsed && !parsed.error && (parsed.product_results || parsed.product || parsed.title || parsed.description)) {
+            data = parsed;
+            break;
+          }
+        }
+      } catch {}
+    }
+    if (!data) {
+      return json({ details: null, reviews: [], error: 'ScrapingDog Google Product endpoint not available' }, 200, corsHeaders);
+    }
+
+    // ScrapingDog immersive product structure:
+    // title, brand, rating, reviews, price_range, about_the_product{features,description},
+    // stores[], thumbnails[], scorecard[], discussions_and_forums[], videos[]
+    const aboutProduct = data.about_the_product || {};
     const details = {
-      description: pr.description || '',
-      highlights: (pr.highlights || []).slice(0, 8),
-      features: (pr.extensions || []).slice(0, 5),
+      description: aboutProduct.description || data.description || '',
+      highlights: Array.isArray(aboutProduct.features) ? aboutProduct.features.slice(0, 8) : [],
+      features: Array.isArray(aboutProduct.features) ? aboutProduct.features.slice(0, 8) : [],
       specs: {},
       media: [],
-      typicalPrices: data.typical_prices || null,
+      typicalPrices: data.price_range || null,
     };
 
-    // Extract specifications
-    const specSource = data.specifications || pr.specifications || [];
-    if (Array.isArray(specSource)) {
-      for (const group of specSource) {
-        for (const item of (group.items || [])) {
-          if (item.title && item.value) details.specs[item.title] = item.value;
+    // Specs from scorecard
+    const scorecard = data.scorecard || [];
+    if (Array.isArray(scorecard)) {
+      for (const card of scorecard) {
+        if (card.items && Array.isArray(card.items)) {
+          for (const item of card.items) {
+            if (item.title) details.specs[item.title] = item.value || item.description || '';
+          }
         }
       }
-    } else if (typeof specSource === 'object') {
-      Object.assign(details.specs, specSource);
     }
 
-    // Extract media
-    if (pr.media) {
-      details.media = (Array.isArray(pr.media) ? pr.media : []).slice(0, 6).map(m => ({
-        link: typeof m === 'string' ? m : (m.link || m.url || ''),
-        type: m.type || 'image',
-      })).filter(m => m.link);
-    } else if (pr.images) {
-      details.media = (Array.isArray(pr.images) ? pr.images : []).slice(0, 6).map(img => ({
-        link: typeof img === 'string' ? img : (img.link || img.url || ''),
+    // Media from thumbnails (skip base64 data URIs)
+    const thumbs = data.thumbnails || [];
+    if (Array.isArray(thumbs)) {
+      details.media = thumbs.slice(0, 6).map(t => ({
+        link: typeof t === 'string' ? t : (t.link || t.url || t.src || ''),
         type: 'image',
-      })).filter(m => m.link);
+      })).filter(m => m.link && !m.link.startsWith('data:'));
     }
 
-    // Extract reviews
-    const reviewsData = data.reviews_results?.reviews || data.reviews || [];
-    const reviews = (Array.isArray(reviewsData) ? reviewsData : []).slice(0, 8).map(r => ({
-      name: r.source || r.author || r.reviewer_name || 'Reviewer',
-      rating: r.rating != null ? parseFloat(r.rating) : null,
-      date: r.date || '',
-      title: r.title || '',
-      body: r.content || r.snippet || r.body || r.review || '',
-      verified: !!r.source,
-      dataSource: 'scrapingdog_google',
-    }));
-    const ratingsHistogram = data.reviews_results?.ratings || [];
-    const topicFilters = (data.reviews_results?.filters?.topic || []).slice(0, 8);
+    // Discussions as review-like content
+    const reviews = [];
+    const discussions = data.discussions_and_forums || [];
+    if (Array.isArray(discussions)) {
+      for (const d2 of discussions.slice(0, 5)) {
+        if (d2.title || d2.snippet) {
+          reviews.push({
+            name: d2.source || 'Forum User',
+            rating: null, date: d2.date || '',
+            title: d2.title || '',
+            body: d2.snippet || d2.content || '',
+            verified: false, dataSource: 'scrapingdog_google',
+          });
+        }
+      }
+    }
 
-    // Extract sellers
-    const sellersData = data.sellers_results?.online_sellers || data.sellers || [];
-    const sellers = (Array.isArray(sellersData) ? sellersData : []).slice(0, 5).map(s => ({
-      name: s.name || s.merchant || '',
-      price: s.base_price || s.total_price || s.price || '',
-      shipping: s.additional_price?.shipping || '',
+    // Sellers/stores
+    const storesData = data.stores || [];
+    const sellers = (Array.isArray(storesData) ? storesData : []).slice(0, 5).map(s => ({
+      name: s.store || s.name || s.merchant || '',
+      price: s.price || s.base_price || '',
+      shipping: s.delivery || s.shipping || '',
       url: s.link || s.url || '#',
       rating: s.rating || null,
       reviewCount: s.reviews || null,
       topQualityStore: !!s.top_quality_store,
     }));
 
-    const result = { details, reviews, sellers, ratingsHistogram, topicFilters };
+    const result = { details, reviews, sellers, ratingsHistogram: [], topicFilters: [] };
 
     if (env.DB) {
       try {
