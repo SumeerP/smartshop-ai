@@ -460,8 +460,13 @@ async function handleProductDetails(request, env, corsHeaders) {
     return handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders);
   }
 
-  // Route: SerpAPI Google Product (legacy or non-Amazon products)
-  if (productId) {
+  // Route: ScrapingDog Google Product if product_id available and provider is scrapingdog
+  if (productId && provider === 'scrapingdog' && env.SCRAPINGDOG_KEY) {
+    return handleScrapingDogGoogleProductDetail(productId, cacheKey, env, corsHeaders);
+  }
+
+  // Route: SerpAPI Google Product (legacy fallback)
+  if (productId && env.SERPAPI_KEY) {
     return handleSerpApiProductDetail(productId, cacheKey, env, corsHeaders);
   }
 
@@ -534,6 +539,95 @@ async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) 
     return json({ ...result, source: 'scrapingdog' }, 200, corsHeaders);
   } catch (err) {
     return json({ details: null, reviews: [], error: 'ScrapingDog error: ' + err.message }, 200, corsHeaders);
+  }
+}
+
+// --- ScrapingDog: Google Product detail ---
+async function handleScrapingDogGoogleProductDetail(productId, cacheKey, env, corsHeaders) {
+  const sdKey = env.SCRAPINGDOG_KEY;
+  try {
+    const sdUrl = `https://api.scrapingdog.com/google_product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`;
+    const res = await fetch(sdUrl);
+    if (!res.ok) {
+      return json({ details: null, reviews: [], error: 'ScrapingDog Google Product request failed' }, 200, corsHeaders);
+    }
+    const data = await res.json();
+
+    const pr = data.product_results || data.product || data || {};
+    const details = {
+      description: pr.description || '',
+      highlights: (pr.highlights || []).slice(0, 8),
+      features: (pr.extensions || []).slice(0, 5),
+      specs: {},
+      media: [],
+      typicalPrices: data.typical_prices || null,
+    };
+
+    // Extract specifications
+    const specSource = data.specifications || pr.specifications || [];
+    if (Array.isArray(specSource)) {
+      for (const group of specSource) {
+        for (const item of (group.items || [])) {
+          if (item.title && item.value) details.specs[item.title] = item.value;
+        }
+      }
+    } else if (typeof specSource === 'object') {
+      Object.assign(details.specs, specSource);
+    }
+
+    // Extract media
+    if (pr.media) {
+      details.media = (Array.isArray(pr.media) ? pr.media : []).slice(0, 6).map(m => ({
+        link: typeof m === 'string' ? m : (m.link || m.url || ''),
+        type: m.type || 'image',
+      })).filter(m => m.link);
+    } else if (pr.images) {
+      details.media = (Array.isArray(pr.images) ? pr.images : []).slice(0, 6).map(img => ({
+        link: typeof img === 'string' ? img : (img.link || img.url || ''),
+        type: 'image',
+      })).filter(m => m.link);
+    }
+
+    // Extract reviews
+    const reviewsData = data.reviews_results?.reviews || data.reviews || [];
+    const reviews = (Array.isArray(reviewsData) ? reviewsData : []).slice(0, 8).map(r => ({
+      name: r.source || r.author || r.reviewer_name || 'Reviewer',
+      rating: r.rating != null ? parseFloat(r.rating) : null,
+      date: r.date || '',
+      title: r.title || '',
+      body: r.content || r.snippet || r.body || r.review || '',
+      verified: !!r.source,
+      dataSource: 'scrapingdog_google',
+    }));
+    const ratingsHistogram = data.reviews_results?.ratings || [];
+    const topicFilters = (data.reviews_results?.filters?.topic || []).slice(0, 8);
+
+    // Extract sellers
+    const sellersData = data.sellers_results?.online_sellers || data.sellers || [];
+    const sellers = (Array.isArray(sellersData) ? sellersData : []).slice(0, 5).map(s => ({
+      name: s.name || s.merchant || '',
+      price: s.base_price || s.total_price || s.price || '',
+      shipping: s.additional_price?.shipping || '',
+      url: s.link || s.url || '#',
+      rating: s.rating || null,
+      reviewCount: s.reviews || null,
+      topQualityStore: !!s.top_quality_store,
+    }));
+
+    const result = { details, reviews, sellers, ratingsHistogram, topicFilters };
+
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO product_details_cache (product_id, details_json) VALUES (?, ?)'
+        ).bind(cacheKey, JSON.stringify(result)).run();
+      } catch {}
+    }
+    await incrementApiUsage(env);
+
+    return json({ ...result, source: 'scrapingdog' }, 200, corsHeaders);
+  } catch (err) {
+    return json({ details: null, reviews: [], error: 'ScrapingDog Google Product error: ' + err.message }, 200, corsHeaders);
   }
 }
 
