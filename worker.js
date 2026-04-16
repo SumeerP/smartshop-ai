@@ -17,6 +17,8 @@
  *   GET  /api/search-products  — Product search (ScrapingDog Amazon+Google Shopping, cached)
  *   GET  /api/product-details  — Product details + reviews (ScrapingDog/SerpAPI, cached)
  *   GET  /api/search-quota     — API usage vs limits
+ *   POST /api/decode           — Decode ingredients/specs (cached lookup)
+ *   POST /api/decode-cache     — Store decode result in D1 cache
  */
 
 const ALLOWED_ORIGINS = [
@@ -807,6 +809,63 @@ async function handlePriceHistory(request, env, corsHeaders) {
 }
 
 // ============================================================
+// INGREDIENT / SPEC DECODER — Cached analysis via D1
+// ============================================================
+
+/**
+ * POST /api/decode — Decode ingredients or specs into plain language
+ * Body: { type: "ingredients"|"specs", content: string|string[]|object, productName: string }
+ * Response cached in D1 decode_cache (30-day TTL)
+ */
+async function handleDecode(request, env, corsHeaders) {
+  if (!env.DB) return json({ error: 'Database not available' }, 500, corsHeaders);
+
+  try {
+    const { type, content, productName } = await request.json();
+    if (!type || !content || !productName) return json({ error: 'Missing type, content, or productName' }, 400, corsHeaders);
+    if (!['ingredients', 'specs'].includes(type)) return json({ error: 'Invalid type — use "ingredients" or "specs"' }, 400, corsHeaders);
+
+    // Build cache key from type + product name
+    const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
+    const cacheKey = await sha256(`decode:${type}:${productName}:${contentStr.slice(0, 200)}`);
+
+    // Check D1 cache (30-day TTL)
+    try {
+      const cached = await env.DB.prepare(
+        `SELECT decode_json FROM decode_cache WHERE cache_key = ? AND created_at > datetime('now', '-30 days')`
+      ).bind(cacheKey).first();
+      if (cached) return json(JSON.parse(cached.decode_json), 200, corsHeaders);
+    } catch {}
+
+    // No cached result — return cache miss (client does the LLM call)
+    return json({ cached: false, cacheKey }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Decode error: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+/**
+ * POST /api/decode-cache — Store a decode result in D1 cache
+ * Body: { cacheKey: string, result: object }
+ */
+async function handleDecodeCache(request, env, corsHeaders) {
+  if (!env.DB) return json({ error: 'Database not available' }, 500, corsHeaders);
+
+  try {
+    const { cacheKey, result } = await request.json();
+    if (!cacheKey || !result) return json({ error: 'Missing cacheKey or result' }, 400, corsHeaders);
+
+    await env.DB.prepare(
+      'INSERT OR REPLACE INTO decode_cache (cache_key, decode_json) VALUES (?, ?)'
+    ).bind(cacheKey, JSON.stringify(result)).run();
+
+    return json({ ok: true }, 200, corsHeaders);
+  } catch (err) {
+    return json({ error: 'Decode cache error: ' + err.message }, 500, corsHeaders);
+  }
+}
+
+// ============================================================
 // IMAGE SCRAPING
 // ============================================================
 
@@ -1470,6 +1529,14 @@ export default {
     // Route: GET /api/price-history?product_key=...
     if (request.method === 'GET' && url.pathname === '/api/price-history') {
       return handlePriceHistory(request, env, corsHeaders);
+    }
+    // Route: POST /api/decode
+    if (request.method === 'POST' && url.pathname === '/api/decode') {
+      return handleDecode(request, env, corsHeaders);
+    }
+    // Route: POST /api/decode-cache
+    if (request.method === 'POST' && url.pathname === '/api/decode-cache') {
+      return handleDecodeCache(request, env, corsHeaders);
     }
 
     // Route: POST / — Anthropic API proxy (catch-all, must be LAST)
