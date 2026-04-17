@@ -101,7 +101,7 @@ async function cacheImage(key, url, env) {
 
 const SERPAPI_DAILY_LIMIT = 8; // Free tier: 250/month ≈ 8/day
 const SCRAPINGDOG_MONTHLY_LIMIT = 1000; // Free tier
-const SCRAPINGDOG_DAILY_LIMIT = 33; // ~1000/30
+const SCRAPINGDOG_DAILY_LIMIT = 150; // 3 keywords × 2 calls = 6 credits/query → ~25 queries/day; monthly cap is the real gate
 const SEARCH_CACHE_TTL_HOURS = 24;
 const DETAIL_CACHE_TTL_DAYS = 7;
 
@@ -302,10 +302,12 @@ async function handleSearchProducts(request, env, corsHeaders) {
     } catch {}
   }
 
-  // Check daily quota
+  // Check daily quota AND monthly quota (real gate for ScrapingDog free tier)
   const usage = await getApiUsage(env);
-  if (usage >= dailyLimit) {
-    log('SEARCH', { q: query, cache: 'MISS', quota: 'EXHAUSTED', used: usage, limit: dailyLimit });
+  const monthlyUsed = provider === 'scrapingdog' ? await getMonthlyApiUsage(env) : 0;
+  const monthlyExhausted = provider === 'scrapingdog' && monthlyUsed >= SCRAPINGDOG_MONTHLY_LIMIT;
+  if (usage >= dailyLimit || monthlyExhausted) {
+    log('SEARCH', { q: query, cache: 'MISS', quota: monthlyExhausted ? 'MONTHLY_EXHAUSTED' : 'DAILY_EXHAUSTED', used: usage, limit: dailyLimit, monthlyUsed });
     // Try returning stale cache (beyond TTL)
     if (env.DB) {
       try {
