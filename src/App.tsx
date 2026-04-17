@@ -138,6 +138,7 @@ async function callAI(messages, sys, opts={}) {
     m.role === "user" ? { ...m, content: `<user_query>${m.content}</user_query>` } : m
   );
   const body={model,max_tokens:opts.maxTokens||2048,system:[{type:"text",text:sys,cache_control:{type:"ephemeral"}}],messages:safeMessages};
+  if(opts.temperature!==undefined)body.temperature=opts.temperature;
   if(opts.webSearch===true)body.tools=[{type:"web_search_20250305",name:"web_search"}];
   const r = await fetch(proxy, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`API error ${r.status}`);}
@@ -781,7 +782,7 @@ export default function App(){
       const intentRaw = await callAI(
         [{role:"user",content:text}],
         buildIntentPrompt(),
-        {model:"claude-haiku-4-5-20251001",maxTokens:256}
+        {model:"claude-haiku-4-5-20251001",maxTokens:256,temperature:0}
       );
       const intent = parseIntent(intentRaw);
 
