@@ -277,7 +277,7 @@ function mapGoogleShoppingProduct(item, index) {
 async function handleSearchProducts(request, env, corsHeaders) {
   const url = new URL(request.url);
   const query = url.searchParams.get('q');
-  const num = Math.min(parseInt(url.searchParams.get('num') || '5'), 10);
+  const num = Math.min(parseInt(url.searchParams.get('num') || '10'), 15);
 
   if (!query) return json({ error: 'Missing query parameter q' }, 400, corsHeaders);
 
@@ -357,7 +357,7 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
       creditsUsed++;
       const amzData = await amzRes.value.json();
       const items = Array.isArray(amzData) ? amzData : (amzData.results || amzData.products || []);
-      for (const [i, item] of items.slice(0, 5).entries()) {
+      for (const [i, item] of items.slice(0, 10).entries()) {
         const p = mapAmazonProduct(item, i);
         const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
         if (key && !seen.has(key)) { seen.add(key); products.push(p); amzCount++; }
@@ -371,7 +371,7 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
       creditsUsed++;
       const gshopData = await gshopRes.value.json();
       const items = gshopData.shopping_results || gshopData.results || [];
-      for (const [i, item] of items.slice(0, 5).entries()) {
+      for (const [i, item] of items.slice(0, 10).entries()) {
         const p = mapGoogleShoppingProduct(item, i);
         const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
         if (key && !seen.has(key)) { seen.add(key); products.push(p); gshopCount++; }
