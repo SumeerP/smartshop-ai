@@ -165,6 +165,8 @@ const VALID_IMAGE_DOMAINS = [
 ];
 function isValidImageUrl(url) {
   if (!url || typeof url !== 'string') return false;
+  // ScrapingDog returns Google Shopping thumbnails as base64 data URIs — accept them
+  if (url.startsWith('data:image/')) return true;
   try {
     const parsed = new URL(url);
     return parsed.protocol === 'https:' && (
