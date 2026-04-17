@@ -37,7 +37,7 @@ const bold=t=>(t||"").replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\
 
 // --- Configuration ---
 // Set your Amazon Associates tag to earn affiliate commissions on Amazon links
-const AMAZON_AFFILIATE_TAG = ''; // e.g. 'mystore-20'
+const AMAZON_AFFILIATE_TAG = '140ed6-20';
 function amazonUrl(asin?: string, name?: string): string {
   if (asin) {
     const base = `https://www.amazon.com/dp/${asin}`;
