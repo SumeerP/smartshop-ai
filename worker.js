@@ -155,7 +155,14 @@ async function incrementApiUsage(env, apiName) {
 
 // Image URL validation
 const VALID_IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|webp|gif|avif|svg)(\?|$)/i;
-const VALID_IMAGE_DOMAINS = ['media-amazon.com', 'images-amazon.com', 'gstatic.com', 'googleusercontent.com', 'target.com', 'walmart.com', 'bestbuy.com'];
+const VALID_IMAGE_DOMAINS = [
+  'media-amazon.com', 'images-amazon.com', 'ssl-images-amazon.com',
+  'gstatic.com', 'googleusercontent.com',
+  'target.com', 'walmart.com', 'bestbuy.com',
+  'sephora.com', 'ulta.com', 'cvs.com', 'walgreens.com',
+  'shopify.com', 'shopifycdn.com', 'squarespace-cdn.com', 'bigcommerce.com',
+  'cdninstagram.com', 'pinimg.com',
+];
 function isValidImageUrl(url) {
   if (!url || typeof url !== 'string') return false;
   try {
@@ -164,6 +171,15 @@ function isValidImageUrl(url) {
       VALID_IMAGE_EXTENSIONS.test(url) ||
       VALID_IMAGE_DOMAINS.some(d => parsed.hostname.endsWith(d))
     );
+  } catch { return false; }
+}
+
+// Looser check for image search results — any HTTPS image URL is acceptable
+function isLikelyImageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const p = new URL(url);
+    return p.protocol === 'https:' && (VALID_IMAGE_EXTENSIONS.test(url) || url.includes('/image') || url.includes('/photo') || url.includes('/img'));
   } catch { return false; }
 }
 
@@ -1192,10 +1208,36 @@ async function tryAmazonImage(asin) {
 }
 
 /**
- * Try Google Shopping search for product image
+ * Try ScrapingDog image search — reliable, uses 1 credit, cached 7 days
+ */
+async function tryScrapingDogImageSearch(query, env) {
+  const sdKey = env?.SCRAPINGDOG_KEY;
+  if (!sdKey) return null;
+  try {
+    // ScrapingDog Google Images search
+    const url = `https://api.scrapingdog.com/google?api_key=${sdKey}&query=${encodeURIComponent(query)}&results=3&type=images`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    // image_results array contains {original, thumbnail, title, link}
+    const results = data.image_results || data.images_results || [];
+    for (const img of results) {
+      const imgUrl = img.original || img.url;
+      if (imgUrl && isLikelyImageUrl(imgUrl)) return imgUrl;
+    }
+    // Fallback: organic result thumbnails (non-gstatic only — gstatic expires)
+    for (const r of (data.organic_results || [])) {
+      if (r.thumbnail && !r.thumbnail.includes('gstatic') && isLikelyImageUrl(r.thumbnail)) return r.thumbnail;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Try Google Shopping search for product image (HTML scraping — last resort)
  */
 async function tryGoogleImage(query) {
-  // Strategy 1: Google Shopping search (better product images)
+  // Strategy 1: Google Shopping search
   try {
     const response = await fetch(
       `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=shop`,
@@ -1208,7 +1250,7 @@ async function tryGoogleImage(query) {
     }
   } catch {}
 
-  // Strategy 2: Regular Google Images search
+  // Strategy 2: Google Images
   try {
     const response = await fetch(
       `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=isch&source=lnms`,
@@ -1243,18 +1285,12 @@ async function handleProductImage(asin, corsHeaders, env) {
     });
   }
 
-  // Try Amazon directly
-  let imageUrl = await tryAmazonImage(asin);
-
-  // Fallback: Google search
-  if (!imageUrl) {
-    imageUrl = await tryGoogleImage(`amazon ${asin} product`);
-  }
-
-  // Broader fallback: search by ASIN only
-  if (!imageUrl) {
-    imageUrl = await tryGoogleImage(`${asin} product image`);
-  }
+  // 1. ScrapingDog image search by ASIN (most reliable)
+  let imageUrl = await tryScrapingDogImageSearch(`amazon ${asin} product`, env);
+  // 2. Scrape Amazon page directly
+  if (!imageUrl) imageUrl = await tryAmazonImage(asin);
+  // 3. HTML scraping fallback
+  if (!imageUrl) imageUrl = await tryGoogleImage(`amazon ${asin} product`);
 
   if (imageUrl) {
     await cacheImage(`asin:${asin}`, imageUrl, env);
@@ -1288,11 +1324,14 @@ async function handleSearchImage(query, corsHeaders, env) {
     });
   }
 
-  const imageUrl = await tryGoogleImage(query);
+  // 1. ScrapingDog image search (reliable, uses 1 credit, cached 7d in KV)
+  let imageUrl = await tryScrapingDogImageSearch(query, env);
+  // 2. HTML scraping fallback (free but often blocked)
+  if (!imageUrl) imageUrl = await tryGoogleImage(query);
 
   if (imageUrl) {
     await cacheImage(key, imageUrl, env);
-    return new Response(JSON.stringify({ imageUrl, source: 'google' }), {
+    return new Response(JSON.stringify({ imageUrl, source: imageUrl ? 'found' : 'none' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
     });
   }
