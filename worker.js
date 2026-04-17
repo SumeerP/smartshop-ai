@@ -337,9 +337,12 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
   if (!sdKey) return json({ error: 'ScrapingDog key not configured' }, 500, corsHeaders);
 
   try {
+    // Amazon works better with shorter queries (3-4 words max) — long queries return 0 results
+    const amzQuery = query.split(' ').slice(0, 4).join(' ');
+
     // Parallel fetch: Amazon + Google Shopping
     const [amzRes, gshopRes] = await Promise.allSettled([
-      fetch(`https://api.scrapingdog.com/amazon/search?api_key=${sdKey}&query=${encodeURIComponent(query)}&domain=com`),
+      fetch(`https://api.scrapingdog.com/amazon/search?api_key=${sdKey}&query=${encodeURIComponent(amzQuery)}&domain=com`),
       fetch(`https://api.scrapingdog.com/google_shopping?api_key=${sdKey}&query=${encodeURIComponent(query)}`),
     ]);
 
@@ -377,6 +380,7 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
 
     log('SD_SEARCH', {
       q: query,
+      amzQ: amzQuery,
       amz: amzOk ? amzCount : `FAIL(${amzRes.reason || (amzRes.value && amzRes.value.status)})`,
       gshop: gshopOk ? gshopCount : `FAIL(${gshopRes.reason || (gshopRes.value && gshopRes.value.status)})`,
       total: products.length,
