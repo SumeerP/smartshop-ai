@@ -115,6 +115,14 @@ async function sha256(text) {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Structured logger — shows up in `npx wrangler tail`
+ * Tags: REQ · SEARCH · SD_SEARCH · PD · SD_AMZ · SD_GOOG · AI · REDDIT · DECODE · ERR
+ */
+function log(tag, data) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), tag, ...data }));
+}
+
 async function getApiUsage(env, apiName) {
   if (!env.DB) return 0;
   const name = apiName || getSearchProvider(env);
@@ -277,6 +285,8 @@ async function handleSearchProducts(request, env, corsHeaders) {
   const queryHash = await sha256(query);
   const dailyLimit = provider === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
 
+  log('SEARCH', { q: query, provider, num });
+
   // Check D1 cache (24h TTL)
   if (env.DB) {
     try {
@@ -286,6 +296,7 @@ async function handleSearchProducts(request, env, corsHeaders) {
       if (cached) {
         const products = JSON.parse(cached.results_json);
         const usage = await getApiUsage(env);
+        log('SEARCH', { q: query, cache: 'HIT', count: products.length, cachedAt: cached.created_at });
         return json({ products: products.slice(0, num), source: 'cache', provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
       }
     } catch {}
@@ -294,6 +305,7 @@ async function handleSearchProducts(request, env, corsHeaders) {
   // Check daily quota
   const usage = await getApiUsage(env);
   if (usage >= dailyLimit) {
+    log('SEARCH', { q: query, cache: 'MISS', quota: 'EXHAUSTED', used: usage, limit: dailyLimit });
     // Try returning stale cache (beyond TTL)
     if (env.DB) {
       try {
@@ -302,12 +314,15 @@ async function handleSearchProducts(request, env, corsHeaders) {
         ).bind(queryHash).first();
         if (stale) {
           const products = JSON.parse(stale.results_json);
+          log('SEARCH', { q: query, cache: 'STALE', count: products.length, cacheAge: stale.created_at });
           return json({ products: products.slice(0, num), source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true, provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
         }
       } catch {}
     }
     return json({ products: [], quota_exhausted: true, provider, quota: { used: usage, limit: dailyLimit } }, 200, corsHeaders);
   }
+
+  log('SEARCH', { q: query, cache: 'MISS', apiCall: true, used: usage, limit: dailyLimit });
 
   // Route to appropriate provider
   if (provider === 'scrapingdog') {
@@ -333,28 +348,40 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
     let creditsUsed = 0;
 
     // Process Amazon results
-    if (amzRes.status === 'fulfilled' && amzRes.value.ok) {
+    const amzOk = amzRes.status === 'fulfilled' && amzRes.value.ok;
+    let amzCount = 0;
+    if (amzOk) {
       creditsUsed++;
       const amzData = await amzRes.value.json();
       const items = Array.isArray(amzData) ? amzData : (amzData.results || amzData.products || []);
       for (const [i, item] of items.slice(0, 5).entries()) {
         const p = mapAmazonProduct(item, i);
         const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
-        if (key && !seen.has(key)) { seen.add(key); products.push(p); }
+        if (key && !seen.has(key)) { seen.add(key); products.push(p); amzCount++; }
       }
     }
 
     // Process Google Shopping results
-    if (gshopRes.status === 'fulfilled' && gshopRes.value.ok) {
+    const gshopOk = gshopRes.status === 'fulfilled' && gshopRes.value.ok;
+    let gshopCount = 0;
+    if (gshopOk) {
       creditsUsed++;
       const gshopData = await gshopRes.value.json();
       const items = gshopData.shopping_results || gshopData.results || [];
       for (const [i, item] of items.slice(0, 5).entries()) {
         const p = mapGoogleShoppingProduct(item, i);
         const key = p.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
-        if (key && !seen.has(key)) { seen.add(key); products.push(p); }
+        if (key && !seen.has(key)) { seen.add(key); products.push(p); gshopCount++; }
       }
     }
+
+    log('SD_SEARCH', {
+      q: query,
+      amz: amzOk ? amzCount : `FAIL(${amzRes.reason || (amzRes.value && amzRes.value.status)})`,
+      gshop: gshopOk ? gshopCount : `FAIL(${gshopRes.reason || (gshopRes.value && gshopRes.value.status)})`,
+      total: products.length,
+      credits: creditsUsed,
+    });
 
     // Track credits used (one per source that responded)
     for (let i = 0; i < creditsUsed; i++) {
@@ -368,11 +395,15 @@ async function handleScrapingDogSearch(query, num, queryHash, usage, dailyLimit,
         await env.DB.prepare(
           'INSERT OR REPLACE INTO search_cache (query_hash, query_text, results_json, result_count) VALUES (?, ?, ?, ?)'
         ).bind(queryHash, query, JSON.stringify(products), products.length).run();
-      } catch {}
+        log('SD_SEARCH', { q: query, cached: true });
+      } catch (e) {
+        log('ERR', { fn: 'SD_SEARCH cache write', error: e.message });
+      }
     }
 
     return json({ products: products.slice(0, num), source: 'scrapingdog', provider: 'scrapingdog', quota: { used: newUsage, limit: dailyLimit } }, 200, corsHeaders);
   } catch (err) {
+    log('ERR', { fn: 'SD_SEARCH', q: query, error: err.message });
     return json({ error: 'ScrapingDog error: ' + err.message }, 502, corsHeaders);
   }
 }
@@ -426,6 +457,8 @@ async function handleProductDetails(request, env, corsHeaders) {
   const provider = getSearchProvider(env);
   const dailyLimit = provider === 'scrapingdog' ? SCRAPINGDOG_DAILY_LIMIT : SERPAPI_DAILY_LIMIT;
 
+  log('PD', { cacheKey, asin: asin || null, productId: productId || null, hasPageToken: !!pageToken, provider });
+
   // Check D1 cache (7-day TTL)
   if (env.DB) {
     try {
@@ -434,6 +467,7 @@ async function handleProductDetails(request, env, corsHeaders) {
       ).bind(cacheKey).first();
       if (cached) {
         const data = JSON.parse(cached.details_json);
+        log('PD', { cacheKey, cache: 'HIT', hasDesc: !!data.details?.description, reviewCount: data.reviews?.length ?? 0 });
         return json({ ...data, source: 'cache' }, 200, corsHeaders);
       }
     } catch {}
@@ -442,6 +476,7 @@ async function handleProductDetails(request, env, corsHeaders) {
   // Check quota
   const usage = await getApiUsage(env);
   if (usage >= dailyLimit) {
+    log('PD', { cacheKey, cache: 'MISS', quota: 'EXHAUSTED', used: usage, limit: dailyLimit });
     // Try stale cache
     if (env.DB) {
       try {
@@ -450,6 +485,7 @@ async function handleProductDetails(request, env, corsHeaders) {
         ).bind(cacheKey).first();
         if (stale) {
           const data = JSON.parse(stale.details_json);
+          log('PD', { cacheKey, cache: 'STALE', cacheAge: stale.created_at });
           return json({ ...data, source: 'stale_cache', cacheAge: stale.created_at, quota_exhausted: true }, 200, corsHeaders);
         }
       } catch {}
@@ -457,21 +493,27 @@ async function handleProductDetails(request, env, corsHeaders) {
     return json({ details: null, reviews: [], quota_exhausted: true }, 200, corsHeaders);
   }
 
+  log('PD', { cacheKey, cache: 'MISS', apiCall: true });
+
   // Route: ScrapingDog Amazon Product if ASIN available and provider is scrapingdog
   if (asin && provider === 'scrapingdog' && env.SCRAPINGDOG_KEY) {
+    log('PD', { cacheKey, route: 'SD_AMAZON', asin });
     return handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders);
   }
 
   // Route: ScrapingDog Google Product if product_id available and provider is scrapingdog
   if (productId && provider === 'scrapingdog' && env.SCRAPINGDOG_KEY) {
+    log('PD', { cacheKey, route: 'SD_GOOGLE', productId, pageToken: pageToken || 'NONE' });
     return handleScrapingDogGoogleProductDetail(productId, pageToken, cacheKey, env, corsHeaders);
   }
 
   // Route: SerpAPI Google Product (legacy fallback)
   if (productId && env.SERPAPI_KEY) {
+    log('PD', { cacheKey, route: 'SERPAPI', productId });
     return handleSerpApiProductDetail(productId, cacheKey, env, corsHeaders);
   }
 
+  log('ERR', { fn: 'PD', cacheKey, reason: 'no_route_available' });
   return json({ details: null, reviews: [], error: 'No detail endpoint available for this product' }, 200, corsHeaders);
 }
 
@@ -480,8 +522,10 @@ async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) 
   const sdKey = env.SCRAPINGDOG_KEY;
   try {
     const sdUrl = `https://api.scrapingdog.com/amazon/product?api_key=${sdKey}&asin=${asin}&domain=com`;
+    log('SD_AMZ', { asin, action: 'fetch' });
     const res = await fetch(sdUrl);
     if (!res.ok) {
+      log('ERR', { fn: 'SD_AMZ', asin, httpStatus: res.status });
       return json({ details: null, reviews: [], error: 'ScrapingDog product request failed' }, 200, corsHeaders);
     }
     const data = await res.json();
@@ -528,6 +572,15 @@ async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) 
 
     const result = { details, reviews, sellers: [], ratingsHistogram: [], topicFilters: [] };
 
+    log('SD_AMZ', {
+      asin,
+      hasDesc: !!details.description,
+      highlights: details.highlights.length,
+      specs: Object.keys(details.specs).length,
+      reviews: reviews.length,
+      images: details.media.length,
+    });
+
     // Cache
     if (env.DB) {
       try {
@@ -540,6 +593,7 @@ async function handleScrapingDogProductDetail(asin, cacheKey, env, corsHeaders) 
 
     return json({ ...result, source: 'scrapingdog' }, 200, corsHeaders);
   } catch (err) {
+    log('ERR', { fn: 'SD_AMZ', asin, error: err.message });
     return json({ details: null, reviews: [], error: 'ScrapingDog error: ' + err.message }, 200, corsHeaders);
   }
 }
@@ -550,6 +604,7 @@ async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheK
   try {
     // ScrapingDog uses /google_immersive_product with page_token for full product details
     let data = null;
+    let successEndpoint = null;
     const endpoints = [];
     if (pageToken) {
       endpoints.push(`https://api.scrapingdog.com/google_immersive_product?api_key=${sdKey}&page_token=${encodeURIComponent(pageToken)}`);
@@ -557,7 +612,10 @@ async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheK
     endpoints.push(`https://api.scrapingdog.com/google_shopping/product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`);
     endpoints.push(`https://api.scrapingdog.com/google_product?api_key=${sdKey}&product_id=${encodeURIComponent(productId)}`);
 
+    log('SD_GOOG', { productId, hasPageToken: !!pageToken, endpoints: endpoints.length });
+
     for (const sdUrl of endpoints) {
+      const endpointName = sdUrl.includes('immersive') ? 'immersive' : sdUrl.includes('google_shopping') ? 'gshop_product' : 'google_product';
       try {
         const res = await fetch(sdUrl);
         if (res.ok) {
@@ -565,14 +623,23 @@ async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheK
           // Verify it's not an error response
           if (parsed && !parsed.error && (parsed.product_results || parsed.product || parsed.title || parsed.description)) {
             data = parsed;
+            successEndpoint = endpointName;
             break;
+          } else {
+            log('SD_GOOG', { productId, endpoint: endpointName, result: 'empty_or_error', sdError: parsed?.error });
           }
+        } else {
+          log('SD_GOOG', { productId, endpoint: endpointName, httpStatus: res.status });
         }
-      } catch {}
+      } catch (e) {
+        log('SD_GOOG', { productId, endpoint: endpointName, fetchError: e.message });
+      }
     }
     if (!data) {
+      log('ERR', { fn: 'SD_GOOG', productId, reason: 'all_endpoints_failed' });
       return json({ details: null, reviews: [], error: 'ScrapingDog Google Product endpoint not available' }, 200, corsHeaders);
     }
+    log('SD_GOOG', { productId, successEndpoint });
 
     // ScrapingDog immersive product structure:
     // title, brand, rating, reviews, price_range, about_the_product{features,description},
@@ -639,6 +706,16 @@ async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheK
 
     const result = { details, reviews, sellers, ratingsHistogram: [], topicFilters: [] };
 
+    log('SD_GOOG', {
+      productId,
+      hasDesc: !!details.description,
+      features: details.features.length,
+      specs: Object.keys(details.specs).length,
+      reviews: reviews.length,
+      sellers: sellers.length,
+      images: details.media.length,
+    });
+
     if (env.DB) {
       try {
         await env.DB.prepare(
@@ -650,6 +727,7 @@ async function handleScrapingDogGoogleProductDetail(productId, pageToken, cacheK
 
     return json({ ...result, source: 'scrapingdog' }, 200, corsHeaders);
   } catch (err) {
+    log('ERR', { fn: 'SD_GOOG', productId, error: err.message });
     return json({ details: null, reviews: [], error: 'ScrapingDog Google Product error: ' + err.message }, 200, corsHeaders);
   }
 }
@@ -1546,6 +1624,18 @@ async function handleApiProxy(request, env, corsHeaders) {
       body.max_tokens = 2048;
     }
 
+    // Identify what this AI call is for by inspecting the system prompt
+    const sysText = (Array.isArray(body.system) ? body.system[0]?.text : body.system) || '';
+    const aiPurpose = sysText.includes('extract shopping search') ? 'intent'
+      : sysText.includes('comparison table') ? 'compare'
+      : sysText.includes('personalized') ? 'personalize'
+      : sysText.includes('review synthesis') ? 'reviews'
+      : sysText.includes('decode') ? 'decode'
+      : sysText.includes('conversational') ? 'chat'
+      : 'unknown';
+
+    log('AI', { model: body.model, maxTokens: body.max_tokens, purpose: aiPurpose, temp: body.temperature ?? 'default' });
+
     const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -1558,12 +1648,24 @@ async function handleApiProxy(request, env, corsHeaders) {
     });
 
     const responseData = await anthropicResponse.text();
+
+    // Log token usage from response
+    try {
+      const parsed = JSON.parse(responseData);
+      if (parsed.usage) {
+        log('AI', { purpose: aiPurpose, model: body.model, inputTokens: parsed.usage.input_tokens, outputTokens: parsed.usage.output_tokens, cacheRead: parsed.usage.cache_read_input_tokens ?? 0 });
+      } else if (!anthropicResponse.ok) {
+        log('ERR', { fn: 'AI', purpose: aiPurpose, httpStatus: anthropicResponse.status, error: parsed.error?.message });
+      }
+    } catch {}
+
     return new Response(responseData, {
       status: anthropicResponse.status,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (err) {
+    log('ERR', { fn: 'AI_PROXY', error: err.message });
     return new Response(JSON.stringify({ error: 'Proxy error: ' + err.message }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -1581,9 +1683,16 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    // Log every real request
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    if (url.pathname !== '/api/search-quota') { // skip noisy quota polls
+      log('REQ', { method: request.method, path: url.pathname, ip: ip.slice(0, 8) + '…' });
+    }
+
     // Check origin
     const origin = request.headers.get('Origin') || '';
     if (!ALLOWED_ORIGINS.includes(origin) && !origin.endsWith('.github.io')) {
+      log('ERR', { path: url.pathname, reason: 'origin_not_allowed', origin });
       return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
         status: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
